@@ -66,6 +66,14 @@ button:disabled {
   display: flex;
   gap: 1rem;
   align-items: center;
+  flex-wrap: wrap;
+}
+
+.selected-file {
+  margin: 0;
+  color: #646cff;
+  font-size: 0.9em;
+  word-break: break-all;
 }
 
 .logs {
@@ -81,6 +89,7 @@ button:disabled {
 .logs textarea {
   width: 100%;
   min-height: 200px;
+  max-height: 400px;
   padding: 0.8rem;
   font-family: 'Courier New', monospace;
   font-size: 0.9em;
