@@ -1,12 +1,23 @@
-import { useState } from "react";
+import { useState, useEffect } from "react";
 import { open } from "@tauri-apps/plugin-dialog";
 import { invoke } from "@tauri-apps/api/core";
+import { listen } from "@tauri-apps/api/event";
 
 function App() {
   const [selectedFile, setSelectedFile] = useState<string>("");
   const [logs, setLogs] = useState<string[]>([]);
   const [isProcessing, setIsProcessing] = useState(false);
   const [srtFilePath, setSrtFilePath] = useState<string>("");
+
+  useEffect(() => {
+    const unlisten = listen<string>("transcription-log", (event) => {
+      addLog(event.payload);
+    });
+
+    return () => {
+      unlisten.then((fn) => fn());
+    };
+  }, []);
 
   const handleSelectFile = async () => {
     try {
@@ -40,10 +51,8 @@ function App() {
     addLog("文字起こしを開始します...");
 
     try {
-      // TODO: Implement Tauri command
-      addLog("処理中...");
-      // const result = await invoke("start_transcription", { filePath: selectedFile });
-      // setSrtFilePath(result);
+      const result = await invoke<string>("start_transcription", { filePath: selectedFile });
+      setSrtFilePath(result);
       addLog("処理が完了しました");
     } catch (error) {
       addLog(`エラーが発生しました: ${error}`);
@@ -56,7 +65,7 @@ function App() {
     if (!srtFilePath) return;
 
     try {
-      // TODO: Implement Tauri command to open file
+      await invoke("open_srt_file", { filePath: srtFilePath });
       addLog(`SRTファイルを開きます: ${srtFilePath}`);
     } catch (error) {
       addLog(`エラー: ${error}`);
