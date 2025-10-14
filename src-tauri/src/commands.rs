@@ -1,7 +1,7 @@
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::env;
-use tauri::AppHandle;
+use tauri::{AppHandle, Emitter};
 
 fn get_env_var(key: &str) -> Result<String, String> {
     env::var(key).map_err(|_| format!("環境変数 {} が設定されていません", key))
