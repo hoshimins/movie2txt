@@ -1,7 +1,7 @@
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::env;
-use tauri::AppHandle;
+use tauri::{AppHandle, Emitter};
 
 fn get_env_var(key: &str) -> Result<String, String> {
     env::var(key).map_err(|_| format!("環境変数 {} が設定されていません", key))
@@ -16,7 +16,11 @@ pub async fn start_transcription(
     let ffmpeg_path = get_env_var("FFMPEG_PATH")?;
     let whisper_path = get_env_var("WHISPER_PATH")?;
     let tmp_dir = get_env_var("TMP_DIR")?;
-    let out_dir = get_env_var("OUT_DIR")?;
+    let out_dir = get_env_var("OUTPUT_DIR")?;
+
+    // パスをPathBufに変換
+    let tmp_dir = PathBuf::from(&tmp_dir);
+    let out_dir = PathBuf::from(&out_dir);
 
     // ディレクトリの存在確認と作成
     std::fs::create_dir_all(&tmp_dir)
@@ -31,7 +35,7 @@ pub async fn start_transcription(
         .ok_or("ファイル名の取得に失敗しました")?;
 
     // 中間wavファイルのパス
-    let wav_path = PathBuf::from(&tmp_dir).join(format!("{}.wav", file_stem));
+    let wav_path = tmp_dir.join(format!("{}.wav", file_stem));
     let wav_path_str = wav_path
         .to_str()
         .ok_or("wavファイルパスの変換に失敗しました")?;
@@ -60,6 +64,21 @@ pub async fn start_transcription(
     // Step 2: faster-whisper で文字起こし
     emit_log(&app, "Whisper処理を開始します...")?;
 
+    // 絶対パスを取得（存在する場合）
+    let out_dir_absolute = if out_dir.is_absolute() {
+        out_dir.clone()
+    } else {
+        std::env::current_dir()
+            .map_err(|e| format!("カレントディレクトリの取得に失敗しました: {}", e))?
+            .join(&out_dir)
+    };
+
+    let out_dir_str = out_dir_absolute
+        .to_str()
+        .ok_or("出力ディレクトリパスの変換に失敗しました")?;
+
+    emit_log(&app, &format!("出力ディレクトリ: {}", out_dir_str))?;
+
     let whisper_output = Command::new(&whisper_path)
         .args(&[
             wav_path_str,
@@ -67,29 +86,27 @@ pub async fn start_transcription(
             "--language", "ja",
             "--device", "cuda",
             "--compute_type", "float16",
-            "--vad",
+            "--vad_filter", "True",
             "--output_format", "srt",
-            "--output_dir", &out_dir,
+            "--output_dir", out_dir_str,
         ])
         .output()
         .map_err(|e| format!("Whisperの実行に失敗しました: {}", e))?;
 
-    if !whisper_output.status.success() {
-        let stderr = String::from_utf8_lossy(&whisper_output.stderr);
-        return Err(format!("Whisper処理に失敗しました: {}", stderr));
-    }
-
     emit_log(&app, "Whisper処理が完了しました")?;
 
     // 出力されたSRTファイルのパス
-    let srt_path = PathBuf::from(&out_dir).join(format!("{}.srt", file_stem));
+    let srt_path = out_dir_absolute.join(format!("{}.srt", file_stem));
     let srt_path_str = srt_path
         .to_str()
         .ok_or("SRTファイルパスの変換に失敗しました")?
         .to_string();
 
+    // SRTファイルの存在を確認（終了コードではなくファイルの存在で判断）
     if !srt_path.exists() {
-        return Err("SRTファイルが生成されませんでした".to_string());
+        let stderr = String::from_utf8_lossy(&whisper_output.stderr);
+        let stdout = String::from_utf8_lossy(&whisper_output.stdout);
+        return Err(format!("SRTファイルが生成されませんでした:\nSTDERR: {}\nSTDOUT: {}", stderr, stdout));
     }
 
     emit_log(&app, &format!("SRTファイルを生成しました: {}", srt_path_str))?;
