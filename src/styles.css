@@ -99,3 +99,97 @@ button:disabled {
   border-radius: 8px;
   resize: vertical;
 }
+
+/* Subtitle Editor Styles */
+.subtitle-editor {
+  display: flex;
+  flex-direction: column;
+  height: 100vh;
+  padding: 1rem;
+  gap: 1rem;
+}
+
+.subtitle-editor.loading,
+.subtitle-editor.error {
+  justify-content: center;
+  align-items: center;
+}
+
+.editor-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding-bottom: 1rem;
+  border-bottom: 1px solid #444;
+}
+
+.editor-header h2 {
+  margin: 0;
+}
+
+.editor-actions {
+  display: flex;
+  gap: 0.5rem;
+}
+
+.error-message {
+  padding: 1rem;
+  background-color: #ff4444;
+  color: white;
+  border-radius: 8px;
+  margin-bottom: 1rem;
+}
+
+.subtitle-list {
+  flex: 1;
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 1rem;
+  padding: 1rem 0;
+}
+
+.subtitle-item {
+  padding: 1rem;
+  background-color: #1a1a1a;
+  border: 1px solid #444;
+  border-radius: 8px;
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+}
+
+.subtitle-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  font-size: 0.9em;
+  color: #888;
+}
+
+.subtitle-index {
+  font-weight: bold;
+  color: #646cff;
+}
+
+.subtitle-time {
+  font-family: 'Courier New', monospace;
+}
+
+.subtitle-text {
+  width: 100%;
+  min-height: 60px;
+  padding: 0.8rem;
+  font-family: inherit;
+  font-size: 1em;
+  background-color: #242424;
+  color: #fff;
+  border: 1px solid #555;
+  border-radius: 4px;
+  resize: vertical;
+}
+
+.subtitle-text:focus {
+  outline: none;
+  border-color: #646cff;
+}
