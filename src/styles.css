@@ -236,6 +236,57 @@ button > * {
   background: linear-gradient(135deg, var(--bg-primary) 0%, var(--bg-secondary) 100%);
 }
 
+.editor-content {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 1.5rem;
+  flex: 1;
+  overflow: hidden;
+}
+
+.video-preview {
+  display: flex;
+  flex-direction: column;
+  gap: 1rem;
+  background: var(--bg-secondary);
+  border-radius: 16px;
+  padding: 1.5rem;
+  border: 1px solid var(--border-color);
+  box-shadow: var(--shadow-md);
+}
+
+.video-player {
+  width: 100%;
+  border-radius: 12px;
+  background: #000;
+  box-shadow: var(--shadow-lg);
+}
+
+.video-controls {
+  display: flex;
+  gap: 1rem;
+  align-items: center;
+  padding: 1rem;
+  background: var(--bg-tertiary);
+  border-radius: 12px;
+}
+
+.control-btn {
+  padding: 0.75rem 1.5rem;
+  font-size: 1em;
+  font-weight: 600;
+}
+
+.video-time {
+  font-family: 'Consolas', 'Monaco', 'Courier New', monospace;
+  color: var(--text-secondary);
+  font-size: 1.1em;
+  font-weight: 600;
+  padding: 0.5rem 1rem;
+  background: var(--bg-primary);
+  border-radius: 8px;
+}
+
 .subtitle-editor.loading,
 .subtitle-editor.error {
   justify-content: center;
@@ -365,6 +416,14 @@ button > * {
   border-color: var(--accent-primary);
   box-shadow: var(--shadow-md);
   transform: translateY(-2px);
+  cursor: pointer;
+}
+
+.subtitle-item.active {
+  border-color: var(--accent-primary);
+  background: var(--bg-tertiary);
+  box-shadow: var(--shadow-lg);
+  transform: scale(1.02);
 }
 
 .subtitle-header {
