@@ -1,7 +1,9 @@
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::env;
+use std::fs;
 use tauri::{AppHandle, Emitter};
+use serde::{Deserialize, Serialize};
 
 fn get_env_var(key: &str) -> Result<String, String> {
     env::var(key).map_err(|_| format!("環境変数 {} が設定されていません", key))
@@ -135,4 +137,69 @@ pub async fn open_srt_file(file_path: String) -> Result<(), String> {
 fn emit_log(app: &AppHandle, message: &str) -> Result<(), String> {
     app.emit("transcription-log", message)
         .map_err(|e| format!("ログの送信に失敗しました: {}", e))
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
+pub struct SubtitleEntry {
+    pub index: usize,
+    pub start_time: String,
+    pub end_time: String,
+    pub text: String,
+}
+
+#[tauri::command]
+pub async fn read_srt_file(file_path: String) -> Result<Vec<SubtitleEntry>, String> {
+    let content = fs::read_to_string(&file_path)
+        .map_err(|e| format!("SRTファイルの読み込みに失敗しました: {}", e))?;
+
+    parse_srt(&content)
+}
+
+fn parse_srt(content: &str) -> Result<Vec<SubtitleEntry>, String> {
+    let mut entries = Vec::new();
+    let blocks: Vec<&str> = content.split("\n\n").filter(|s| !s.trim().is_empty()).collect();
+
+    for block in blocks {
+        let lines: Vec<&str> = block.lines().collect();
+        if lines.len() < 3 {
+            continue;
+        }
+
+        let index = lines[0].trim().parse::<usize>()
+            .map_err(|_| format!("インデックスのパースに失敗しました: {}", lines[0]))?;
+
+        let time_parts: Vec<&str> = lines[1].split(" --> ").collect();
+        if time_parts.len() != 2 {
+            continue;
+        }
+
+        let start_time = time_parts[0].trim().to_string();
+        let end_time = time_parts[1].trim().to_string();
+        let text = lines[2..].join("\n");
+
+        entries.push(SubtitleEntry {
+            index,
+            start_time,
+            end_time,
+            text,
+        });
+    }
+
+    Ok(entries)
+}
+
+#[tauri::command]
+pub async fn save_srt_file(file_path: String, entries: Vec<SubtitleEntry>) -> Result<(), String> {
+    let mut content = String::new();
+
+    for entry in entries {
+        content.push_str(&format!("{}\n", entry.index));
+        content.push_str(&format!("{} --> {}\n", entry.start_time, entry.end_time));
+        content.push_str(&format!("{}\n\n", entry.text));
+    }
+
+    fs::write(&file_path, content)
+        .map_err(|e| format!("SRTファイルの保存に失敗しました: {}", e))?;
+
+    Ok(())
 }
