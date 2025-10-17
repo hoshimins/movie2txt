@@ -92,6 +92,7 @@ function App() {
     return (
       <SubtitleEditor
         srtFilePath={srtFilePath}
+        videoFilePath={selectedFile}
         onClose={handleEditorClose}
         onSave={handleEditorSave}
       />

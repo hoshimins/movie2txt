@@ -20,6 +20,10 @@
     ],
     "security": {
       "csp": null,
+      "assetProtocol": {
+        "enable": true,
+        "scope": ["**"]
+      },
       "capabilities": [
         {
           "identifier": "main-capability",
