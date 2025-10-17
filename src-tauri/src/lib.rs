@@ -13,6 +13,8 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             commands::start_transcription,
             commands::open_srt_file,
+            commands::read_srt_file,
+            commands::save_srt_file,
         ])
         .setup(|app| {
             #[cfg(debug_assertions)]
