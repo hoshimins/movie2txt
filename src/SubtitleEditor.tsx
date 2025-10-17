@@ -24,11 +24,21 @@ function SubtitleEditor({ srtFilePath, videoFilePath, onClose, onSave }: Subtitl
   const [isPlaying, setIsPlaying] = useState(false);
   const [currentTime, setCurrentTime] = useState(0);
   const [activeSubtitleIndex, setActiveSubtitleIndex] = useState<number | null>(null);
+  const [videoError, setVideoError] = useState<string>("");
+  const [videoLoaded, setVideoLoaded] = useState(false);
   const videoRef = useRef<HTMLVideoElement>(null);
 
   useEffect(() => {
     loadSubtitles();
   }, [srtFilePath]);
+
+  useEffect(() => {
+    console.log("Video file path:", videoFilePath);
+    if (videoFilePath) {
+      const convertedSrc = convertFileSrc(videoFilePath);
+      console.log("Converted video src:", convertedSrc);
+    }
+  }, [videoFilePath]);
 
   const loadSubtitles = async () => {
     try {
@@ -108,6 +118,40 @@ function SubtitleEditor({ srtFilePath, videoFilePath, onClose, onSave }: Subtitl
     }
   };
 
+  const handleVideoError = (e: React.SyntheticEvent<HTMLVideoElement, Event>) => {
+    const videoElement = e.currentTarget;
+    let errorMessage = "動画の読み込みに失敗しました";
+
+    if (videoElement.error) {
+      switch (videoElement.error.code) {
+        case MediaError.MEDIA_ERR_ABORTED:
+          errorMessage = "動画の読み込みが中断されました";
+          break;
+        case MediaError.MEDIA_ERR_NETWORK:
+          errorMessage = "ネットワークエラーで動画を読み込めませんでした";
+          break;
+        case MediaError.MEDIA_ERR_DECODE:
+          errorMessage = "動画のデコードに失敗しました";
+          break;
+        case MediaError.MEDIA_ERR_SRC_NOT_SUPPORTED:
+          errorMessage = "この動画形式はサポートされていません";
+          break;
+      }
+      console.error("Video error:", videoElement.error);
+    }
+    setVideoError(errorMessage);
+  };
+
+  const handleVideoLoadedMetadata = () => {
+    console.log("Video metadata loaded successfully");
+    setVideoLoaded(true);
+    setVideoError("");
+  };
+
+  const handleVideoCanPlay = () => {
+    console.log("Video can play");
+  };
+
   if (loading) {
     return <div className="subtitle-editor loading">読み込み中...</div>;
   }
@@ -116,6 +160,15 @@ function SubtitleEditor({ srtFilePath, videoFilePath, onClose, onSave }: Subtitl
     return (
       <div className="subtitle-editor error">
         <p>{error}</p>
+        <button onClick={onClose}>閉じる</button>
+      </div>
+    );
+  }
+
+  if (!videoFilePath) {
+    return (
+      <div className="subtitle-editor error">
+        <p>動画ファイルのパスが見つかりません</p>
         <button onClick={onClose}>閉じる</button>
       </div>
     );
@@ -136,24 +189,33 @@ function SubtitleEditor({ srtFilePath, videoFilePath, onClose, onSave }: Subtitl
       </div>
 
       {error && <div className="error-message">{error}</div>}
+      {videoError && <div className="error-message">動画エラー: {videoError}</div>}
 
       <div className="editor-content">
         <div className="video-preview">
+          {!videoLoaded && !videoError && (
+            <div className="video-loading">動画を読み込んでいます...</div>
+          )}
           <video
             ref={videoRef}
             src={videoSrc}
             onTimeUpdate={handleTimeUpdate}
             onPlay={() => setIsPlaying(true)}
             onPause={() => setIsPlaying(false)}
+            onError={handleVideoError}
+            onLoadedMetadata={handleVideoLoadedMetadata}
+            onCanPlay={handleVideoCanPlay}
+            controls
             className="video-player"
           />
           <div className="video-controls">
-            <button onClick={handlePlayPause} className="control-btn">
+            <button onClick={handlePlayPause} className="control-btn" disabled={!videoLoaded}>
               {isPlaying ? "⏸ 一時停止" : "▶ 再生"}
             </button>
             <span className="video-time">
               {Math.floor(currentTime / 60)}:{String(Math.floor(currentTime % 60)).padStart(2, '0')}
             </span>
+            {videoLoaded && <span className="video-status">✓ 準備完了</span>}
           </div>
         </div>
 
