@@ -13,6 +13,7 @@ fn get_env_var(key: &str) -> Result<String, String> {
 pub async fn start_transcription(
     app: AppHandle,
     file_path: String,
+    max_line_width: Option<u32>,
 ) -> Result<String, String> {
     // 環境変数から設定を読み取る
     let ffmpeg_path = get_env_var("FFMPEG_PATH")?;
@@ -81,17 +82,30 @@ pub async fn start_transcription(
 
     emit_log(&app, &format!("出力ディレクトリ: {}", out_dir_str))?;
 
+    let mut whisper_args = vec![
+        wav_path_str,
+        "--model", "large-v3",
+        "--language", "ja",
+        "--device", "cuda",
+        "--compute_type", "float16",
+        "--vad_filter", "True",
+        "--output_format", "srt",
+        "--output_dir", out_dir_str,
+    ];
+
+    // max_line_widthが指定されている場合（0以外）、オプションを追加
+    let max_line_width_str;
+    if let Some(width) = max_line_width {
+        if width > 0 {
+            max_line_width_str = width.to_string();
+            whisper_args.push("--max_line_width");
+            whisper_args.push(&max_line_width_str);
+            emit_log(&app, &format!("1行あたりの最大文字数: {}", width))?;
+        }
+    }
+
     let whisper_output = Command::new(&whisper_path)
-        .args(&[
-            wav_path_str,
-            "--model", "large-v3",
-            "--language", "ja",
-            "--device", "cuda",
-            "--compute_type", "float16",
-            "--vad_filter", "True",
-            "--output_format", "srt",
-            "--output_dir", out_dir_str,
-        ])
+        .args(&whisper_args)
         .output()
         .map_err(|e| format!("Whisperの実行に失敗しました: {}", e))?;
 

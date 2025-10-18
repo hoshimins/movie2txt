@@ -10,6 +10,7 @@ function App() {
   const [isProcessing, setIsProcessing] = useState(false);
   const [srtFilePath, setSrtFilePath] = useState<string>("");
   const [showEditor, setShowEditor] = useState(false);
+  const [maxLineWidth, setMaxLineWidth] = useState<number>(23);
 
   useEffect(() => {
     const unlisten = listen<string>("transcription-log", (event) => {
@@ -19,6 +20,17 @@ function App() {
     return () => {
       unlisten.then((fn) => fn());
     };
+  }, []);
+
+  useEffect(() => {
+    // localStorageから設定を読み込む
+    const saved = localStorage.getItem("maxLineWidth");
+    if (saved) {
+      const value = parseInt(saved);
+      if (!isNaN(value) && value >= 0) {
+        setMaxLineWidth(value);
+      }
+    }
   }, []);
 
   const handleSelectFile = async () => {
@@ -53,13 +65,32 @@ function App() {
     addLog("文字起こしを開始します...");
 
     try {
-      const result = await invoke<string>("start_transcription", { filePath: selectedFile });
+      const maxLineWidthParam = maxLineWidth > 0 ? maxLineWidth : null;
+      const result = await invoke<string>("start_transcription", {
+        filePath: selectedFile,
+        maxLineWidth: maxLineWidthParam
+      });
       setSrtFilePath(result);
       addLog("処理が完了しました");
     } catch (error) {
       addLog(`エラーが発生しました: ${error}`);
     } finally {
       setIsProcessing(false);
+    }
+  };
+
+  const handleMaxLineWidthChange = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const value = e.target.value;
+    if (value === "") {
+      setMaxLineWidth(0);
+      return;
+    }
+
+    const numValue = parseInt(value);
+    if (!isNaN(numValue) && numValue >= 0) {
+      setMaxLineWidth(numValue);
+      // localStorageに保存
+      localStorage.setItem("maxLineWidth", numValue.toString());
     }
   };
 
@@ -108,6 +139,22 @@ function App() {
           動画ファイルを選択
         </button>
         {selectedFile && <p className="selected-file">選択中: {selectedFile}</p>}
+      </div>
+
+      <div className="settings">
+        <label htmlFor="maxLineWidth">
+          1行あたりの最大文字数:
+          <input
+            id="maxLineWidth"
+            type="number"
+            min="0"
+            value={maxLineWidth}
+            onChange={handleMaxLineWidthChange}
+            disabled={isProcessing}
+            className="max-line-width-input"
+          />
+          <span className="hint">(0 = 制限なし)</span>
+        </label>
       </div>
 
       <div className="controls">
