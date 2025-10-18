@@ -159,6 +159,9 @@ fn emit_log(app: &AppHandle, message: &str) -> Result<(), String> {
 
 /// 日本語テキストを自然な位置で分割する
 fn split_japanese_text(text: &str, max_chars: usize) -> Vec<String> {
+    // 既存の改行を取り除いて1行にする
+    let text = text.replace('\n', "").replace('\r', "");
+
     let mut lines = Vec::new();
     let mut current_line = String::new();
     let mut char_count = 0;
