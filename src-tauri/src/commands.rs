@@ -13,6 +13,7 @@ fn get_env_var(key: &str) -> Result<String, String> {
 pub async fn start_transcription(
     app: AppHandle,
     file_path: String,
+    max_line_width: Option<u32>,
 ) -> Result<String, String> {
     // 環境変数から設定を読み取る
     let ffmpeg_path = get_env_var("FFMPEG_PATH")?;
@@ -81,17 +82,25 @@ pub async fn start_transcription(
 
     emit_log(&app, &format!("出力ディレクトリ: {}", out_dir_str))?;
 
+    let whisper_args = vec![
+        wav_path_str,
+        "--model", "large-v3",
+        "--language", "ja",
+        "--device", "cuda",
+        "--compute_type", "float16",
+        "--vad_filter", "True",
+        "--output_format", "srt",
+        "--output_dir", out_dir_str,
+    ];
+
+    if let Some(width) = max_line_width {
+        if width > 0 {
+            emit_log(&app, &format!("1行あたりの最大文字数: {}", width))?;
+        }
+    }
+
     let whisper_output = Command::new(&whisper_path)
-        .args(&[
-            wav_path_str,
-            "--model", "large-v3",
-            "--language", "ja",
-            "--device", "cuda",
-            "--compute_type", "float16",
-            "--vad_filter", "True",
-            "--output_format", "srt",
-            "--output_dir", out_dir_str,
-        ])
+        .args(&whisper_args)
         .output()
         .map_err(|e| format!("Whisperの実行に失敗しました: {}", e))?;
 
@@ -112,6 +121,15 @@ pub async fn start_transcription(
     }
 
     emit_log(&app, &format!("SRTファイルを生成しました: {}", srt_path_str))?;
+
+    // max_line_widthが指定されている場合、日本語対応の文字数制限を適用
+    if let Some(width) = max_line_width {
+        if width > 0 {
+            emit_log(&app, "文字数制限を適用しています...")?;
+            apply_character_limit(&srt_path_str, width as usize)?;
+            emit_log(&app, "文字数制限の適用が完了しました")?;
+        }
+    }
 
     Ok(srt_path_str)
 }
@@ -139,6 +157,71 @@ fn emit_log(app: &AppHandle, message: &str) -> Result<(), String> {
         .map_err(|e| format!("ログの送信に失敗しました: {}", e))
 }
 
+/// テキストを指定文字数で分割する
+fn split_japanese_text(text: &str, max_chars: usize) -> Vec<String> {
+    // 既存の改行を取り除いて1行にする
+    let text = text.replace('\n', "").replace('\r', "");
+
+    let mut lines = Vec::new();
+    let chars: Vec<char> = text.chars().collect();
+    let mut i = 0;
+
+    while i < chars.len() {
+        let end = (i + max_chars).min(chars.len());
+        let line: String = chars[i..end].iter().collect();
+        lines.push(line);
+        i = end;
+    }
+
+    if lines.is_empty() {
+        vec![text.to_string()]
+    } else {
+        lines
+    }
+}
+
+/// SRTファイルに文字数制限を適用する
+fn apply_character_limit(file_path: &str, max_chars: usize) -> Result<(), String> {
+    // SRTファイルを読み込む
+    let content = fs::read_to_string(file_path)
+        .map_err(|e| format!("SRTファイルの読み込みに失敗しました: {}", e))?;
+
+    let entries = parse_srt(&content)?;
+    let mut new_entries = Vec::new();
+
+    for (index, entry) in entries.iter().enumerate() {
+        let lines = split_japanese_text(&entry.text, max_chars);
+
+        // 複数行に分割する場合でも、タイムスタンプは維持して改行で区切る
+        let text = lines.join("\n");
+
+        new_entries.push(SubtitleEntry {
+            index: index + 1,
+            start_time: entry.start_time.clone(),
+            end_time: entry.end_time.clone(),
+            text,
+        });
+    }
+
+    // 新しいSRTファイルを書き込む
+    let mut content = String::new();
+    for entry in new_entries {
+        content.push_str(&entry.index.to_string());
+        content.push('\n');
+        content.push_str(&entry.start_time);
+        content.push_str(" --> ");
+        content.push_str(&entry.end_time);
+        content.push('\n');
+        content.push_str(&entry.text);
+        content.push_str("\n\n");
+    }
+
+    fs::write(file_path, content)
+        .map_err(|e| format!("SRTファイルの保存に失敗しました: {}", e))?;
+
+    Ok(())
+}
+
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct SubtitleEntry {
     pub index: usize,
@@ -157,9 +240,12 @@ pub async fn read_srt_file(file_path: String) -> Result<Vec<SubtitleEntry>, Stri
 
 fn parse_srt(content: &str) -> Result<Vec<SubtitleEntry>, String> {
     let mut entries = Vec::new();
+
+    // Windows/Unix両方の改行コードに対応
+    let content = content.replace("\r\n", "\n");
     let blocks: Vec<&str> = content.split("\n\n").filter(|s| !s.trim().is_empty()).collect();
 
-    for block in blocks {
+    for block in blocks.iter() {
         let lines: Vec<&str> = block.lines().collect();
         if lines.len() < 3 {
             continue;

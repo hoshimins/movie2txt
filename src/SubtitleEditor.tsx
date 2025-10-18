@@ -59,6 +59,65 @@ function SubtitleEditor({ srtFilePath, videoFilePath, onClose, onSave }: Subtitl
     ));
   };
 
+  const handleSplitEntry = (index: number, cursorPosition: number) => {
+    const entry = entries.find(e => e.index === index);
+    if (!entry) return;
+
+    const text = entry.text;
+    const beforeText = text.substring(0, cursorPosition).trim();
+    const afterText = text.substring(cursorPosition).trim();
+
+    if (!beforeText || !afterText) {
+      alert("分割位置の前後にテキストが必要です");
+      return;
+    }
+
+    // 時間を計算して分割
+    const startSec = parseTimeToSeconds(entry.start_time);
+    const endSec = parseTimeToSeconds(entry.end_time);
+    const duration = endSec - startSec;
+    const midSec = startSec + duration / 2;
+
+    const formatTime = (seconds: number): string => {
+      const hrs = Math.floor(seconds / 3600);
+      const mins = Math.floor((seconds % 3600) / 60);
+      const secs = Math.floor(seconds % 60);
+      const millis = Math.round((seconds % 1) * 1000);
+      return `${String(hrs).padStart(2, '0')}:${String(mins).padStart(2, '0')}:${String(secs).padStart(2, '0')},${String(millis).padStart(3, '0')}`;
+    };
+
+    const midTime = formatTime(midSec);
+
+    setEntries(prev => {
+      const entryIdx = prev.findIndex(e => e.index === index);
+      if (entryIdx === -1) return prev;
+
+      const newEntries = [...prev];
+
+      // 既存エントリを更新
+      newEntries[entryIdx] = {
+        ...entry,
+        end_time: midTime,
+        text: beforeText,
+      };
+
+      // 新しいエントリを挿入
+      newEntries.splice(entryIdx + 1, 0, {
+        index: index + 1,
+        start_time: midTime,
+        end_time: entry.end_time,
+        text: afterText,
+      });
+
+      // 後続のエントリのインデックスを更新
+      for (let i = entryIdx + 2; i < newEntries.length; i++) {
+        newEntries[i] = { ...newEntries[i], index: newEntries[i].index + 1 };
+      }
+
+      return newEntries;
+    });
+  };
+
   const handleSave = async () => {
     try {
       setSaving(true);
@@ -231,8 +290,21 @@ function SubtitleEditor({ srtFilePath, videoFilePath, onClose, onSave }: Subtitl
                 <span className="subtitle-time">
                   {entry.start_time} → {entry.end_time}
                 </span>
+                <button
+                  className="split-btn"
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    const textarea = document.querySelector(`textarea[data-index="${entry.index}"]`) as HTMLTextAreaElement;
+                    const cursorPos = textarea?.selectionStart || Math.floor(entry.text.length / 2);
+                    handleSplitEntry(entry.index, cursorPos);
+                  }}
+                  title="カーソル位置で分割"
+                >
+                  ✂ 分割
+                </button>
               </div>
               <textarea
+                data-index={entry.index}
                 value={entry.text}
                 onChange={(e) => handleTextChange(entry.index, e.target.value)}
                 className="subtitle-text"
