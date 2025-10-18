@@ -238,38 +238,19 @@ fn apply_character_limit(file_path: &str, max_chars: usize) -> Result<(), String
 
     let entries = parse_srt(&content)?;
     let mut new_entries = Vec::new();
-    let mut current_index = 1;
 
-    for entry in entries {
+    for (index, entry) in entries.iter().enumerate() {
         let lines = split_japanese_text(&entry.text, max_chars);
 
-        if lines.len() == 1 {
-            // 分割不要
-            new_entries.push(SubtitleEntry {
-                index: current_index,
-                start_time: entry.start_time,
-                end_time: entry.end_time,
-                text: lines[0].clone(),
-            });
-            current_index += 1;
-        } else {
-            // 複数行に分割
-            let duration = calculate_duration(&entry.start_time, &entry.end_time)?;
-            let segment_duration = duration / lines.len() as f64;
+        // 複数行に分割する場合でも、タイムスタンプは維持して改行で区切る
+        let text = lines.join("\n");
 
-            for (i, line) in lines.iter().enumerate() {
-                let segment_start = add_duration(&entry.start_time, segment_duration * i as f64)?;
-                let segment_end = add_duration(&entry.start_time, segment_duration * (i + 1) as f64)?;
-
-                new_entries.push(SubtitleEntry {
-                    index: current_index,
-                    start_time: segment_start,
-                    end_time: segment_end,
-                    text: line.clone(),
-                });
-                current_index += 1;
-            }
-        }
+        new_entries.push(SubtitleEntry {
+            index: index + 1,
+            start_time: entry.start_time.clone(),
+            end_time: entry.end_time.clone(),
+            text,
+        });
     }
 
     // 新しいSRTファイルを書き込む
@@ -284,55 +265,6 @@ fn apply_character_limit(file_path: &str, max_chars: usize) -> Result<(), String
         .map_err(|e| format!("SRTファイルの保存に失敗しました: {}", e))?;
 
     Ok(())
-}
-
-/// タイムスタンプから秒数を計算
-fn parse_timestamp(timestamp: &str) -> Result<f64, String> {
-    // 00:00:00,000 形式をパース
-    let parts: Vec<&str> = timestamp.split(':').collect();
-    if parts.len() != 3 {
-        return Err(format!("タイムスタンプの形式が不正です: {}", timestamp));
-    }
-
-    let hours: f64 = parts[0].parse()
-        .map_err(|_| format!("時間のパースに失敗しました: {}", parts[0]))?;
-    let minutes: f64 = parts[1].parse()
-        .map_err(|_| format!("分のパースに失敗しました: {}", parts[1]))?;
-
-    let sec_parts: Vec<&str> = parts[2].split(',').collect();
-    if sec_parts.len() != 2 {
-        return Err(format!("秒の形式が不正です: {}", parts[2]));
-    }
-
-    let seconds: f64 = sec_parts[0].parse()
-        .map_err(|_| format!("秒のパースに失敗しました: {}", sec_parts[0]))?;
-    let millis: f64 = sec_parts[1].parse()
-        .map_err(|_| format!("ミリ秒のパースに失敗しました: {}", sec_parts[1]))?;
-
-    Ok(hours * 3600.0 + minutes * 60.0 + seconds + millis / 1000.0)
-}
-
-/// 秒数をタイムスタンプに変換
-fn format_timestamp(seconds: f64) -> String {
-    let hours = (seconds / 3600.0).floor() as u32;
-    let minutes = ((seconds % 3600.0) / 60.0).floor() as u32;
-    let secs = (seconds % 60.0).floor() as u32;
-    let millis = ((seconds % 1.0) * 1000.0).round() as u32;
-
-    format!("{:02}:{:02}:{:02},{:03}", hours, minutes, secs, millis)
-}
-
-/// 2つのタイムスタンプの差分を計算
-fn calculate_duration(start: &str, end: &str) -> Result<f64, String> {
-    let start_secs = parse_timestamp(start)?;
-    let end_secs = parse_timestamp(end)?;
-    Ok(end_secs - start_secs)
-}
-
-/// タイムスタンプに秒数を加算
-fn add_duration(timestamp: &str, duration: f64) -> Result<String, String> {
-    let secs = parse_timestamp(timestamp)?;
-    Ok(format_timestamp(secs + duration))
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
