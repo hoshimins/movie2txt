@@ -82,7 +82,7 @@ pub async fn start_transcription(
 
     emit_log(&app, &format!("出力ディレクトリ: {}", out_dir_str))?;
 
-    let mut whisper_args = vec![
+    let whisper_args = vec![
         wav_path_str,
         "--model", "large-v3",
         "--language", "ja",
@@ -93,13 +93,8 @@ pub async fn start_transcription(
         "--output_dir", out_dir_str,
     ];
 
-    // max_line_widthが指定されている場合（0以外）、オプションを追加
-    let max_line_width_str;
     if let Some(width) = max_line_width {
         if width > 0 {
-            max_line_width_str = width.to_string();
-            whisper_args.push("--max_line_width");
-            whisper_args.push(&max_line_width_str);
             emit_log(&app, &format!("1行あたりの最大文字数: {}", width))?;
         }
     }
@@ -127,6 +122,15 @@ pub async fn start_transcription(
 
     emit_log(&app, &format!("SRTファイルを生成しました: {}", srt_path_str))?;
 
+    // max_line_widthが指定されている場合、日本語対応の文字数制限を適用
+    if let Some(width) = max_line_width {
+        if width > 0 {
+            emit_log(&app, "文字数制限を適用しています...")?;
+            apply_character_limit(&srt_path_str, width as usize)?;
+            emit_log(&app, "文字数制限の適用が完了しました")?;
+        }
+    }
+
     Ok(srt_path_str)
 }
 
@@ -151,6 +155,184 @@ pub async fn open_srt_file(file_path: String) -> Result<(), String> {
 fn emit_log(app: &AppHandle, message: &str) -> Result<(), String> {
     app.emit("transcription-log", message)
         .map_err(|e| format!("ログの送信に失敗しました: {}", e))
+}
+
+/// 日本語テキストを自然な位置で分割する
+fn split_japanese_text(text: &str, max_chars: usize) -> Vec<String> {
+    let mut lines = Vec::new();
+    let mut current_line = String::new();
+    let mut char_count = 0;
+
+    // 句読点や助詞など、区切りとして適切な文字
+    let break_chars = ['、', '。', '？', '！', 'ー', 'っ', 'ん'];
+    let particles = ["は", "が", "を", "に", "で", "と", "の", "へ", "や", "も", "から", "まで", "より"];
+
+    let chars: Vec<char> = text.chars().collect();
+    let mut i = 0;
+
+    while i < chars.len() {
+        let ch = chars[i];
+        current_line.push(ch);
+        char_count += 1;
+
+        // 文字数が上限に達した場合
+        if char_count >= max_chars {
+            // 次の文字を確認して適切な区切り位置を探す
+            let mut split_here = false;
+
+            // 句読点の後で区切る
+            if break_chars.contains(&ch) {
+                split_here = true;
+            }
+            // 助詞の後で区切る（2文字先読み）
+            else if i + 1 < chars.len() {
+                let next_two: String = chars[i..std::cmp::min(i + 2, chars.len())].iter().collect();
+                for particle in &particles {
+                    if next_two.starts_with(particle) {
+                        // 助詞を含めて次の行へ
+                        for _ in 0..particle.chars().count() {
+                            if i + 1 < chars.len() {
+                                i += 1;
+                                current_line.push(chars[i]);
+                            }
+                        }
+                        split_here = true;
+                        break;
+                    }
+                }
+            }
+
+            // どうしても区切り位置が見つからない場合は強制的に区切る
+            if !split_here && char_count >= max_chars + 5 {
+                split_here = true;
+            }
+
+            if split_here {
+                lines.push(current_line.trim().to_string());
+                current_line = String::new();
+                char_count = 0;
+            }
+        }
+
+        i += 1;
+    }
+
+    // 残りのテキストを追加
+    if !current_line.trim().is_empty() {
+        lines.push(current_line.trim().to_string());
+    }
+
+    // 空行のみの場合は元のテキストを返す
+    if lines.is_empty() {
+        vec![text.to_string()]
+    } else {
+        lines
+    }
+}
+
+/// SRTファイルに文字数制限を適用する
+fn apply_character_limit(file_path: &str, max_chars: usize) -> Result<(), String> {
+    // SRTファイルを読み込む
+    let content = fs::read_to_string(file_path)
+        .map_err(|e| format!("SRTファイルの読み込みに失敗しました: {}", e))?;
+
+    let entries = parse_srt(&content)?;
+    let mut new_entries = Vec::new();
+    let mut current_index = 1;
+
+    for entry in entries {
+        let lines = split_japanese_text(&entry.text, max_chars);
+
+        if lines.len() == 1 {
+            // 分割不要
+            new_entries.push(SubtitleEntry {
+                index: current_index,
+                start_time: entry.start_time,
+                end_time: entry.end_time,
+                text: lines[0].clone(),
+            });
+            current_index += 1;
+        } else {
+            // 複数行に分割
+            let duration = calculate_duration(&entry.start_time, &entry.end_time)?;
+            let segment_duration = duration / lines.len() as f64;
+
+            for (i, line) in lines.iter().enumerate() {
+                let segment_start = add_duration(&entry.start_time, segment_duration * i as f64)?;
+                let segment_end = add_duration(&entry.start_time, segment_duration * (i + 1) as f64)?;
+
+                new_entries.push(SubtitleEntry {
+                    index: current_index,
+                    start_time: segment_start,
+                    end_time: segment_end,
+                    text: line.clone(),
+                });
+                current_index += 1;
+            }
+        }
+    }
+
+    // 新しいSRTファイルを書き込む
+    let mut content = String::new();
+    for entry in new_entries {
+        content.push_str(&format!("{}\n", entry.index));
+        content.push_str(&format!("{} --> {}\n", entry.start_time, entry.end_time));
+        content.push_str(&format!("{}\n\n", entry.text));
+    }
+
+    fs::write(file_path, content)
+        .map_err(|e| format!("SRTファイルの保存に失敗しました: {}", e))?;
+
+    Ok(())
+}
+
+/// タイムスタンプから秒数を計算
+fn parse_timestamp(timestamp: &str) -> Result<f64, String> {
+    // 00:00:00,000 形式をパース
+    let parts: Vec<&str> = timestamp.split(':').collect();
+    if parts.len() != 3 {
+        return Err(format!("タイムスタンプの形式が不正です: {}", timestamp));
+    }
+
+    let hours: f64 = parts[0].parse()
+        .map_err(|_| format!("時間のパースに失敗しました: {}", parts[0]))?;
+    let minutes: f64 = parts[1].parse()
+        .map_err(|_| format!("分のパースに失敗しました: {}", parts[1]))?;
+
+    let sec_parts: Vec<&str> = parts[2].split(',').collect();
+    if sec_parts.len() != 2 {
+        return Err(format!("秒の形式が不正です: {}", parts[2]));
+    }
+
+    let seconds: f64 = sec_parts[0].parse()
+        .map_err(|_| format!("秒のパースに失敗しました: {}", sec_parts[0]))?;
+    let millis: f64 = sec_parts[1].parse()
+        .map_err(|_| format!("ミリ秒のパースに失敗しました: {}", sec_parts[1]))?;
+
+    Ok(hours * 3600.0 + minutes * 60.0 + seconds + millis / 1000.0)
+}
+
+/// 秒数をタイムスタンプに変換
+fn format_timestamp(seconds: f64) -> String {
+    let hours = (seconds / 3600.0).floor() as u32;
+    let minutes = ((seconds % 3600.0) / 60.0).floor() as u32;
+    let secs = (seconds % 60.0).floor() as u32;
+    let millis = ((seconds % 1.0) * 1000.0).round() as u32;
+
+    format!("{:02}:{:02}:{:02},{:03}", hours, minutes, secs, millis)
+}
+
+/// 2つのタイムスタンプの差分を計算
+fn calculate_duration(start: &str, end: &str) -> Result<f64, String> {
+    let start_secs = parse_timestamp(start)?;
+    let end_secs = parse_timestamp(end)?;
+    Ok(end_secs - start_secs)
+}
+
+/// タイムスタンプに秒数を加算
+fn add_duration(timestamp: &str, duration: f64) -> Result<String, String> {
+    let secs = parse_timestamp(timestamp)?;
+    Ok(format_timestamp(secs + duration))
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
