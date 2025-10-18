@@ -157,75 +157,22 @@ fn emit_log(app: &AppHandle, message: &str) -> Result<(), String> {
         .map_err(|e| format!("ログの送信に失敗しました: {}", e))
 }
 
-/// 日本語テキストを自然な位置で分割する
+/// テキストを指定文字数で分割する
 fn split_japanese_text(text: &str, max_chars: usize) -> Vec<String> {
     // 既存の改行を取り除いて1行にする
     let text = text.replace('\n', "").replace('\r', "");
 
     let mut lines = Vec::new();
-    let mut current_line = String::new();
-    let mut char_count = 0;
-
-    // 句読点や助詞など、区切りとして適切な文字
-    let break_chars = ['、', '。', '？', '！', 'ー', 'っ', 'ん'];
-    let particles = ["は", "が", "を", "に", "で", "と", "の", "へ", "や", "も", "から", "まで", "より"];
-
     let chars: Vec<char> = text.chars().collect();
     let mut i = 0;
 
     while i < chars.len() {
-        let ch = chars[i];
-        current_line.push(ch);
-        char_count += 1;
-
-        // 文字数が上限に達した場合
-        if char_count >= max_chars {
-            // 次の文字を確認して適切な区切り位置を探す
-            let mut split_here = false;
-
-            // 句読点の後で区切る
-            if break_chars.contains(&ch) {
-                split_here = true;
-            }
-            // 助詞の後で区切る（2文字先読み）
-            else if i + 1 < chars.len() {
-                let next_two: String = chars[i..std::cmp::min(i + 2, chars.len())].iter().collect();
-                for particle in &particles {
-                    if next_two.starts_with(particle) {
-                        // 助詞を含めて次の行へ
-                        for _ in 0..particle.chars().count() {
-                            if i + 1 < chars.len() {
-                                i += 1;
-                                current_line.push(chars[i]);
-                            }
-                        }
-                        split_here = true;
-                        break;
-                    }
-                }
-            }
-
-            // どうしても区切り位置が見つからない場合は強制的に区切る
-            if !split_here && char_count >= max_chars + 5 {
-                split_here = true;
-            }
-
-            if split_here {
-                lines.push(current_line.trim().to_string());
-                current_line = String::new();
-                char_count = 0;
-            }
-        }
-
-        i += 1;
+        let end = (i + max_chars).min(chars.len());
+        let line: String = chars[i..end].iter().collect();
+        lines.push(line);
+        i = end;
     }
 
-    // 残りのテキストを追加
-    if !current_line.trim().is_empty() {
-        lines.push(current_line.trim().to_string());
-    }
-
-    // 空行のみの場合は元のテキストを返す
     if lines.is_empty() {
         vec![text.to_string()]
     } else {
@@ -240,25 +187,10 @@ fn apply_character_limit(file_path: &str, max_chars: usize) -> Result<(), String
         .map_err(|e| format!("SRTファイルの読み込みに失敗しました: {}", e))?;
 
     let entries = parse_srt(&content)?;
-
-    // デバッグ: 読み込んだエントリ数を確認
-    eprintln!("DEBUG: 読み込んだエントリ数: {}", entries.len());
-
     let mut new_entries = Vec::new();
 
     for (index, entry) in entries.iter().enumerate() {
-        // デバッグ: 各エントリの情報を出力
-        let preview: String = entry.text.chars().take(20).collect();
-        eprintln!("DEBUG: エントリ {} - テキスト長: {}, 内容: {:?}",
-                  index + 1, entry.text.len(), preview);
-
         let lines = split_japanese_text(&entry.text, max_chars);
-
-        // デバッグ: 分割結果
-        eprintln!("DEBUG: 分割後の行数: {}", lines.len());
-        for (i, line) in lines.iter().enumerate() {
-            eprintln!("DEBUG:   行{}: {}", i + 1, line);
-        }
 
         // 複数行に分割する場合でも、タイムスタンプは維持して改行で区切る
         let text = lines.join("\n");
@@ -313,15 +245,9 @@ fn parse_srt(content: &str) -> Result<Vec<SubtitleEntry>, String> {
     let content = content.replace("\r\n", "\n");
     let blocks: Vec<&str> = content.split("\n\n").filter(|s| !s.trim().is_empty()).collect();
 
-    eprintln!("DEBUG parse_srt: ブロック数: {}", blocks.len());
-
-    for (i, block) in blocks.iter().enumerate() {
-        let preview: String = block.chars().take(50).collect();
-        eprintln!("DEBUG parse_srt: ブロック{}: {:?}", i + 1, preview);
-
+    for block in blocks.iter() {
         let lines: Vec<&str> = block.lines().collect();
         if lines.len() < 3 {
-            eprintln!("DEBUG parse_srt: ブロック{}をスキップ (行数不足: {})", i + 1, lines.len());
             continue;
         }
 
@@ -330,7 +256,6 @@ fn parse_srt(content: &str) -> Result<Vec<SubtitleEntry>, String> {
 
         let time_parts: Vec<&str> = lines[1].split(" --> ").collect();
         if time_parts.len() != 2 {
-            eprintln!("DEBUG parse_srt: ブロック{}をスキップ (タイムスタンプ形式エラー)", i + 1);
             continue;
         }
 
