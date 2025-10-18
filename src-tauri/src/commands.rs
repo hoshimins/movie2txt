@@ -240,10 +240,24 @@ fn apply_character_limit(file_path: &str, max_chars: usize) -> Result<(), String
         .map_err(|e| format!("SRTファイルの読み込みに失敗しました: {}", e))?;
 
     let entries = parse_srt(&content)?;
+
+    // デバッグ: 読み込んだエントリ数を確認
+    eprintln!("DEBUG: 読み込んだエントリ数: {}", entries.len());
+
     let mut new_entries = Vec::new();
 
     for (index, entry) in entries.iter().enumerate() {
+        // デバッグ: 各エントリの情報を出力
+        eprintln!("DEBUG: エントリ {} - テキスト長: {}, 内容: {:?}",
+                  index + 1, entry.text.len(), &entry.text[..entry.text.len().min(50)]);
+
         let lines = split_japanese_text(&entry.text, max_chars);
+
+        // デバッグ: 分割結果
+        eprintln!("DEBUG: 分割後の行数: {}", lines.len());
+        for (i, line) in lines.iter().enumerate() {
+            eprintln!("DEBUG:   行{}: {}", i + 1, line);
+        }
 
         // 複数行に分割する場合でも、タイムスタンプは維持して改行で区切る
         let text = lines.join("\n");
@@ -259,9 +273,14 @@ fn apply_character_limit(file_path: &str, max_chars: usize) -> Result<(), String
     // 新しいSRTファイルを書き込む
     let mut content = String::new();
     for entry in new_entries {
-        content.push_str(&format!("{}\n", entry.index));
-        content.push_str(&format!("{} --> {}\n", entry.start_time, entry.end_time));
-        content.push_str(&format!("{}\n\n", entry.text));
+        content.push_str(&entry.index.to_string());
+        content.push('\n');
+        content.push_str(&entry.start_time);
+        content.push_str(" --> ");
+        content.push_str(&entry.end_time);
+        content.push('\n');
+        content.push_str(&entry.text);
+        content.push_str("\n\n");
     }
 
     fs::write(file_path, content)
