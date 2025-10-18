@@ -248,8 +248,9 @@ fn apply_character_limit(file_path: &str, max_chars: usize) -> Result<(), String
 
     for (index, entry) in entries.iter().enumerate() {
         // デバッグ: 各エントリの情報を出力
+        let preview: String = entry.text.chars().take(20).collect();
         eprintln!("DEBUG: エントリ {} - テキスト長: {}, 内容: {:?}",
-                  index + 1, entry.text.len(), &entry.text[..entry.text.len().min(50)]);
+                  index + 1, entry.text.len(), preview);
 
         let lines = split_japanese_text(&entry.text, max_chars);
 
@@ -307,11 +308,20 @@ pub async fn read_srt_file(file_path: String) -> Result<Vec<SubtitleEntry>, Stri
 
 fn parse_srt(content: &str) -> Result<Vec<SubtitleEntry>, String> {
     let mut entries = Vec::new();
+
+    // Windows/Unix両方の改行コードに対応
+    let content = content.replace("\r\n", "\n");
     let blocks: Vec<&str> = content.split("\n\n").filter(|s| !s.trim().is_empty()).collect();
 
-    for block in blocks {
+    eprintln!("DEBUG parse_srt: ブロック数: {}", blocks.len());
+
+    for (i, block) in blocks.iter().enumerate() {
+        let preview: String = block.chars().take(50).collect();
+        eprintln!("DEBUG parse_srt: ブロック{}: {:?}", i + 1, preview);
+
         let lines: Vec<&str> = block.lines().collect();
         if lines.len() < 3 {
+            eprintln!("DEBUG parse_srt: ブロック{}をスキップ (行数不足: {})", i + 1, lines.len());
             continue;
         }
 
@@ -320,6 +330,7 @@ fn parse_srt(content: &str) -> Result<Vec<SubtitleEntry>, String> {
 
         let time_parts: Vec<&str> = lines[1].split(" --> ").collect();
         if time_parts.len() != 2 {
+            eprintln!("DEBUG parse_srt: ブロック{}をスキップ (タイムスタンプ形式エラー)", i + 1);
             continue;
         }
 
