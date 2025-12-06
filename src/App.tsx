@@ -1,7 +1,7 @@
-import { useState, useEffect } from "react";
-import { open } from "@tauri-apps/plugin-dialog";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
+import { open } from "@tauri-apps/plugin-dialog";
+import { useEffect, useState } from "react";
 import SubtitleEditor from "./SubtitleEditor";
 
 function App() {
@@ -131,19 +131,35 @@ function App() {
   }
 
   return (
-    <div className="container">
-      <h1>Movie2Text - 動画文字起こしツール</h1>
+    <div className="app-layout">
+      {/* Header */}
+      <header className="app-header">
+        <h1>Movie2Text AI</h1>
+      </header>
 
-      <div className="file-selector">
-        <button onClick={handleSelectFile} disabled={isProcessing}>
-          動画ファイルを選択
-        </button>
-        {selectedFile && <p className="selected-file">選択中: {selectedFile}</p>}
-      </div>
+      {/* Sidebar - Settings & File Selection */}
+      <div className="sidebar">
 
-      <div className="settings">
-        <label htmlFor="maxLineWidth">
-          1行あたりの最大文字数:
+        {/* File Selector */}
+        <section className="panel file-drop-area">
+          <button className="primary" onClick={handleSelectFile} disabled={isProcessing}>
+            動画を選択
+          </button>
+
+          {selectedFile ? (
+            <div className="selected-file-badge" title={selectedFile}>
+              {selectedFile.split(/[\\/]/).pop()}
+            </div>
+          ) : (
+            <p className="text-muted text-sm">ファイルが選択されていません</p>
+          )}
+        </section>
+
+        {/* Global Controls */}
+        <section className="panel flex flex-col gap-4">
+          <label className="text-sm font-bold text-muted" htmlFor="maxLineWidth">
+            文字数制限 (0=無制限)
+          </label>
           <input
             id="maxLineWidth"
             type="number"
@@ -151,44 +167,60 @@ function App() {
             value={maxLineWidth}
             onChange={handleMaxLineWidthChange}
             disabled={isProcessing}
-            className="max-line-width-input"
+            className="w-full"
           />
-          <span className="hint">(0 = 制限なし)</span>
-        </label>
+
+          <button
+            className="primary w-full"
+            onClick={handleStartTranscription}
+            disabled={!selectedFile || isProcessing}
+          >
+            {isProcessing ? "文字起こし中..." : "開始"}
+          </button>
+        </section>
+
+        {/* Action Buttons */}
+        <section className="flex flex-col gap-2">
+          <button
+            onClick={handleEditSubtitles}
+            disabled={!srtFilePath}
+          >
+            字幕編集
+          </button>
+          <button
+            onClick={handleOpenSrt}
+            disabled={!srtFilePath}
+          >
+            フォルダを開く
+          </button>
+        </section>
       </div>
 
-      <div className="controls">
-        <button
-          onClick={handleStartTranscription}
-          disabled={!selectedFile || isProcessing}
-        >
-          {isProcessing ? "処理中..." : "変換開始"}
-        </button>
-      </div>
+      {/* Main Content Area */}
+      <main className="main-content">
 
-      <div className="logs">
-        <h3>処理ログ:</h3>
-        <textarea
-          readOnly
-          value={logs.join("\n")}
-          placeholder="ログがここに表示されます..."
-        />
-      </div>
+        {showEditor && srtFilePath ? (
+          <SubtitleEditor
+            srtFilePath={srtFilePath}
+            videoFilePath={selectedFile}
+            onClose={handleEditorClose}
+            onSave={handleEditorSave}
+          />
+        ) : (
+          <div className="panel logs-container">
+            <div className="logs-header">
+              System Logs
+            </div>
+            <textarea
+              className="logs-display"
+              readOnly
+              value={logs.join("\n")}
+              placeholder="システムログがここに表示されます..."
+            />
+          </div>
+        )}
 
-      <div className="output">
-        <button
-          onClick={handleEditSubtitles}
-          disabled={!srtFilePath}
-        >
-          字幕を編集
-        </button>
-        <button
-          onClick={handleOpenSrt}
-          disabled={!srtFilePath}
-        >
-          SRTファイルを開く
-        </button>
-      </div>
+      </main>
     </div>
   );
 }

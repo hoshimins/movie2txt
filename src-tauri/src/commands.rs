@@ -49,8 +49,11 @@ pub async fn start_transcription(
     let ffmpeg_output = Command::new(&ffmpeg_path)
         .args(&[
             "-i", &file_path,
+            "-vn",
             "-ar", "16000",
             "-ac", "1",
+            "-acodec", "pcm_s16le",
+            "-af", "aresample=async=1",
             "-y",
             wav_path_str,
         ])

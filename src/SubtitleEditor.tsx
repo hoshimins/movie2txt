@@ -1,6 +1,5 @@
-import { useState, useEffect, useRef } from "react";
-import { invoke } from "@tauri-apps/api/core";
-import { convertFileSrc } from "@tauri-apps/api/core";
+import { convertFileSrc, invoke } from "@tauri-apps/api/core";
+import { useEffect, useRef, useState } from "react";
 
 interface SubtitleEntry {
   index: number;
@@ -26,7 +25,10 @@ function SubtitleEditor({ srtFilePath, videoFilePath, onClose, onSave }: Subtitl
   const [activeSubtitleIndex, setActiveSubtitleIndex] = useState<number | null>(null);
   const [videoError, setVideoError] = useState<string>("");
   const [videoLoaded, setVideoLoaded] = useState(false);
+  const [videoDuration, setVideoDuration] = useState(0);
+  const [draggingEntry, setDraggingEntry] = useState<{ index: number; edge: 'start' | 'end' } | null>(null);
   const videoRef = useRef<HTMLVideoElement>(null);
+  const timelineRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
     loadSubtitles();
@@ -56,6 +58,18 @@ function SubtitleEditor({ srtFilePath, videoFilePath, onClose, onSave }: Subtitl
   const handleTextChange = (index: number, newText: string) => {
     setEntries(prev => prev.map(entry =>
       entry.index === index ? { ...entry, text: newText } : entry
+    ));
+  };
+
+  const handleTimeChange = (index: number, field: 'start_time' | 'end_time', newTime: string) => {
+    // Basic validation: check format HH:MM:SS,mmm
+    const timeRegex = /^\d{2}:\d{2}:\d{2},\d{3}$/;
+    if (!timeRegex.test(newTime)) {
+      return; // Invalid format, don't update
+    }
+
+    setEntries(prev => prev.map(entry =>
+      entry.index === index ? { ...entry, [field]: newTime } : entry
     ));
   };
 
@@ -112,6 +126,28 @@ function SubtitleEditor({ srtFilePath, videoFilePath, onClose, onSave }: Subtitl
       // 後続のエントリのインデックスを更新
       for (let i = entryIdx + 2; i < newEntries.length; i++) {
         newEntries[i] = { ...newEntries[i], index: newEntries[i].index + 1 };
+      }
+
+      return newEntries;
+    });
+  };
+
+  const handleDeleteEntry = (index: number) => {
+    if (!confirm("この字幕エントリを削除しますか？")) {
+      return;
+    }
+
+    setEntries(prev => {
+      const entryIdx = prev.findIndex(e => e.index === index);
+      if (entryIdx === -1) return prev;
+
+      const newEntries = [...prev];
+      // エントリを削除
+      newEntries.splice(entryIdx, 1);
+
+      // 後続のエントリのインデックスを再採番
+      for (let i = entryIdx; i < newEntries.length; i++) {
+        newEntries[i] = { ...newEntries[i], index: i + 1 };
       }
 
       return newEntries;
@@ -203,12 +239,70 @@ function SubtitleEditor({ srtFilePath, videoFilePath, onClose, onSave }: Subtitl
 
   const handleVideoLoadedMetadata = () => {
     console.log("Video metadata loaded successfully");
+    if (videoRef.current) {
+      setVideoDuration(videoRef.current.duration);
+    }
     setVideoLoaded(true);
     setVideoError("");
   };
 
   const handleVideoCanPlay = () => {
     console.log("Video can play");
+  };
+
+  const formatTime = (seconds: number): string => {
+    const hrs = Math.floor(seconds / 3600);
+    const mins = Math.floor((seconds % 3600) / 60);
+    const secs = Math.floor(seconds % 60);
+    const millis = Math.round((seconds % 1) * 1000);
+    return `${String(hrs).padStart(2, '0')}:${String(mins).padStart(2, '0')}:${String(secs).padStart(2, '0')},${String(millis).padStart(3, '0')}`;
+  };
+
+  const handleTimelineClick = (e: React.MouseEvent<HTMLDivElement>) => {
+    if (!timelineRef.current || !videoRef.current || videoDuration === 0) return;
+
+    const rect = timelineRef.current.getBoundingClientRect();
+    const x = e.clientX - rect.left;
+    const percentage = x / rect.width;
+    const time = percentage * videoDuration;
+
+    videoRef.current.currentTime = Math.max(0, Math.min(time, videoDuration));
+  };
+
+  const handleTimelineDragStart = (index: number, edge: 'start' | 'end', e: React.MouseEvent) => {
+    e.stopPropagation();
+    setDraggingEntry({ index, edge });
+  };
+
+  const handleTimelineDrag = (e: React.MouseEvent<HTMLDivElement>) => {
+    if (!draggingEntry || !timelineRef.current || videoDuration === 0) return;
+
+    const rect = timelineRef.current.getBoundingClientRect();
+    const x = Math.max(0, Math.min(e.clientX - rect.left, rect.width));
+    const percentage = x / rect.width;
+    const newTime = percentage * videoDuration;
+
+    const entry = entries.find(e => e.index === draggingEntry.index);
+    if (!entry) return;
+
+    const startSec = parseTimeToSeconds(entry.start_time);
+    const endSec = parseTimeToSeconds(entry.end_time);
+
+    setEntries(prev => prev.map(e => {
+      if (e.index !== draggingEntry.index) return e;
+
+      if (draggingEntry.edge === 'start') {
+        const newStartTime = Math.max(0, Math.min(newTime, endSec - 0.1));
+        return { ...e, start_time: formatTime(newStartTime) };
+      } else {
+        const newEndTime = Math.max(startSec + 0.1, Math.min(newTime, videoDuration));
+        return { ...e, end_time: formatTime(newEndTime) };
+      }
+    }));
+  };
+
+  const handleTimelineDragEnd = () => {
+    setDraggingEntry(null);
   };
 
   if (loading) {
@@ -240,15 +334,15 @@ function SubtitleEditor({ srtFilePath, videoFilePath, onClose, onSave }: Subtitl
       <div className="editor-header">
         <h2>字幕編集</h2>
         <div className="editor-actions">
-          <button onClick={handleSave} disabled={saving}>
+          <button className="primary" onClick={handleSave} disabled={saving}>
             {saving ? "保存中..." : "保存"}
           </button>
           <button onClick={onClose}>閉じる</button>
         </div>
       </div>
 
-      {error && <div className="error-message">{error}</div>}
-      {videoError && <div className="error-message">動画エラー: {videoError}</div>}
+      {error && <div className="error-message panel" style={{ borderColor: 'var(--error)' }}>{error}</div>}
+      {videoError && <div className="error-message panel" style={{ borderColor: 'var(--error)' }}>動画エラー: {videoError}</div>}
 
       <div className="editor-content">
         <div className="video-preview">
@@ -268,14 +362,70 @@ function SubtitleEditor({ srtFilePath, videoFilePath, onClose, onSave }: Subtitl
             className="video-player"
           />
           <div className="video-controls">
-            <button onClick={handlePlayPause} className="control-btn" disabled={!videoLoaded}>
+            <button onClick={handlePlayPause} className="primary" disabled={!videoLoaded}>
               {isPlaying ? "⏸ 一時停止" : "▶ 再生"}
             </button>
             <span className="video-time">
               {Math.floor(currentTime / 60)}:{String(Math.floor(currentTime % 60)).padStart(2, '0')}
             </span>
-            {videoLoaded && <span className="video-status">✓ 準備完了</span>}
+            {videoLoaded && <span className="video-status" style={{ color: 'var(--success)' }}>✓ 準備完了</span>}
           </div>
+
+          {/* Timeline */}
+          {videoLoaded && videoDuration > 0 && (
+            <div className="timeline-container">
+              <div className="timeline-header">
+                <span>タイムライン</span>
+                <span className="timeline-duration">
+                  {Math.floor(videoDuration / 60)}:{String(Math.floor(videoDuration % 60)).padStart(2, '0')}
+                </span>
+              </div>
+              <div
+                ref={timelineRef}
+                className="timeline"
+                onClick={handleTimelineClick}
+                onMouseMove={handleTimelineDrag}
+                onMouseUp={handleTimelineDragEnd}
+                onMouseLeave={handleTimelineDragEnd}
+              >
+                {/* Current time indicator */}
+                <div
+                  className="timeline-cursor"
+                  style={{ left: `${(currentTime / videoDuration) * 100}%` }}
+                />
+
+                {/* Subtitle entries on timeline */}
+                {entries.map((entry) => {
+                  const startSec = parseTimeToSeconds(entry.start_time);
+                  const endSec = parseTimeToSeconds(entry.end_time);
+                  const left = (startSec / videoDuration) * 100;
+                  const width = ((endSec - startSec) / videoDuration) * 100;
+
+                  return (
+                    <div
+                      key={entry.index}
+                      className={`timeline-entry ${activeSubtitleIndex === entry.index ? 'active' : ''}`}
+                      style={{
+                        left: `${left}%`,
+                        width: `${width}%`,
+                      }}
+                      title={`#${entry.index}: ${entry.start_time} → ${entry.end_time}`}
+                    >
+                      <div
+                        className="timeline-entry-edge timeline-entry-start"
+                        onMouseDown={(e) => handleTimelineDragStart(entry.index, 'start', e)}
+                      />
+                      <div className="timeline-entry-label">#{entry.index}</div>
+                      <div
+                        className="timeline-entry-edge timeline-entry-end"
+                        onMouseDown={(e) => handleTimelineDragStart(entry.index, 'end', e)}
+                      />
+                    </div>
+                  );
+                })}
+              </div>
+            </div>
+          )}
         </div>
 
         <div className="subtitle-list">
@@ -286,29 +436,59 @@ function SubtitleEditor({ srtFilePath, videoFilePath, onClose, onSave }: Subtitl
               onClick={() => handleSeekToSubtitle(entry.index)}
             >
               <div className="subtitle-header">
-                <span className="subtitle-index">#{entry.index}</span>
-                <span className="subtitle-time">
-                  {entry.start_time} → {entry.end_time}
-                </span>
-                <button
-                  className="split-btn"
-                  onClick={(e) => {
-                    e.stopPropagation();
-                    const textarea = document.querySelector(`textarea[data-index="${entry.index}"]`) as HTMLTextAreaElement;
-                    const cursorPos = textarea?.selectionStart || Math.floor(entry.text.length / 2);
-                    handleSplitEntry(entry.index, cursorPos);
-                  }}
-                  title="カーソル位置で分割"
-                >
-                  ✂ 分割
-                </button>
+                <span className="subtitle-index" style={{ color: 'var(--accent-primary)' }}>#{entry.index}</span>
+                <div className="subtitle-time-inputs">
+                  <input
+                    type="text"
+                    className="time-input"
+                    value={entry.start_time}
+                    onChange={(e) => handleTimeChange(entry.index, 'start_time', e.target.value)}
+                    onClick={(e) => e.stopPropagation()}
+                    placeholder="00:00:00,000"
+                    title="開始時間"
+                  />
+                  <span className="time-arrow">→</span>
+                  <input
+                    type="text"
+                    className="time-input"
+                    value={entry.end_time}
+                    onChange={(e) => handleTimeChange(entry.index, 'end_time', e.target.value)}
+                    onClick={(e) => e.stopPropagation()}
+                    placeholder="00:00:00,000"
+                    title="終了時間"
+                  />
+                </div>
+                <div className="subtitle-actions">
+                  <button
+                    className="split-btn"
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      const textarea = document.querySelector(`textarea[data-index="${entry.index}"]`) as HTMLTextAreaElement;
+                      const cursorPos = textarea?.selectionStart || Math.floor(entry.text.length / 2);
+                      handleSplitEntry(entry.index, cursorPos);
+                    }}
+                    title="カーソル位置で分割"
+                  >
+                    ✂
+                  </button>
+                  <button
+                    className="delete-btn"
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      handleDeleteEntry(entry.index);
+                    }}
+                    title="この字幕を削除"
+                  >
+                    🗑
+                  </button>
+                </div>
               </div>
               <textarea
                 data-index={entry.index}
                 value={entry.text}
                 onChange={(e) => handleTextChange(entry.index, e.target.value)}
                 className="subtitle-text"
-                rows={3}
+                rows={2}
                 onClick={(e) => e.stopPropagation()}
               />
             </div>
