@@ -46,17 +46,25 @@ pub async fn start_transcription(
     // Step 1: ffmpeg で 16kHz mono に変換
     emit_log(&app, "ffmpeg処理を開始します...")?;
 
-    let ffmpeg_output = Command::new(&ffmpeg_path)
-        .args(&[
-            "-i", &file_path,
-            "-vn",
-            "-ar", "16000",
-            "-ac", "1",
-            "-acodec", "pcm_s16le",
-            "-af", "aresample=async=1",
-            "-y",
-            wav_path_str,
-        ])
+    let mut ffmpeg_cmd = Command::new(&ffmpeg_path);
+    ffmpeg_cmd.args(&[
+        "-i", &file_path,
+        "-vn",
+        "-ar", "16000",
+        "-ac", "1",
+        "-acodec", "pcm_s16le",
+        "-af", "aresample=async=1",
+        "-y",
+        wav_path_str,
+    ]);
+
+    #[cfg(target_os = "windows")]
+    {
+        use std::os::windows::process::CommandExt;
+        ffmpeg_cmd.creation_flags(0x08000000);
+    }
+
+    let ffmpeg_output = ffmpeg_cmd
         .output()
         .map_err(|e| format!("ffmpegの実行に失敗しました: {}", e))?;
 
@@ -102,8 +110,16 @@ pub async fn start_transcription(
         }
     }
 
-    let whisper_output = Command::new(&whisper_path)
-        .args(&whisper_args)
+    let mut whisper_cmd = Command::new(&whisper_path);
+    whisper_cmd.args(&whisper_args);
+
+    #[cfg(target_os = "windows")]
+    {
+        use std::os::windows::process::CommandExt;
+        whisper_cmd.creation_flags(0x08000000);
+    }
+
+    let whisper_output = whisper_cmd
         .output()
         .map_err(|e| format!("Whisperの実行に失敗しました: {}", e))?;
 
