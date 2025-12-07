@@ -183,7 +183,7 @@ fn split_japanese_text(text: &str, max_chars: usize) -> Vec<String> {
     }
 }
 
-/// SRTファイルに文字数制限を適用する
+/// SRTファイルに文字数制限を適用する（時間を分割して適用）
 fn apply_character_limit(file_path: &str, max_chars: usize) -> Result<(), String> {
     // SRTファイルを読み込む
     let content = fs::read_to_string(file_path)
@@ -191,19 +191,56 @@ fn apply_character_limit(file_path: &str, max_chars: usize) -> Result<(), String
 
     let entries = parse_srt(&content)?;
     let mut new_entries = Vec::new();
+    let mut current_id = 1;
 
-    for (index, entry) in entries.iter().enumerate() {
+    for entry in entries {
+        // 時間をパース
+        let start_seconds = parse_time_to_seconds(&entry.start_time)?;
+        let end_seconds = parse_time_to_seconds(&entry.end_time)?;
+        let duration = end_seconds - start_seconds;
+
+        // テキストを分割
         let lines = split_japanese_text(&entry.text, max_chars);
 
-        // 複数行に分割する場合でも、タイムスタンプは維持して改行で区切る
-        let text = lines.join("\n");
+        // 全文字数を計算（比率計算用）
+        let total_chars: usize = lines.iter().map(|s| s.chars().count()).sum();
 
-        new_entries.push(SubtitleEntry {
-            index: index + 1,
-            start_time: entry.start_time.clone(),
-            end_time: entry.end_time.clone(),
-            text,
-        });
+        if total_chars == 0 {
+             new_entries.push(SubtitleEntry {
+                index: current_id,
+                start_time: entry.start_time,
+                end_time: entry.end_time,
+                text: entry.text,
+            });
+            current_id += 1;
+            continue;
+        }
+
+        let mut current_start = start_seconds;
+
+        for (i, line) in lines.iter().enumerate() {
+            let char_count = line.chars().count();
+            // 持続時間を文字数比率で配分
+            let ratio = char_count as f64 / total_chars as f64;
+            let split_duration = duration * ratio;
+
+            let mut current_end = current_start + split_duration;
+
+            // 最後のセグメントは元の終了時間に合わせる（誤差防止）
+            if i == lines.len() - 1 {
+                current_end = end_seconds;
+            }
+
+            new_entries.push(SubtitleEntry {
+                index: current_id,
+                start_time: format_seconds_to_time(current_start),
+                end_time: format_seconds_to_time(current_end),
+                text: line.clone(),
+            });
+
+            current_id += 1;
+            current_start = current_end;
+        }
     }
 
     // 新しいSRTファイルを書き込む
@@ -223,6 +260,37 @@ fn apply_character_limit(file_path: &str, max_chars: usize) -> Result<(), String
         .map_err(|e| format!("SRTファイルの保存に失敗しました: {}", e))?;
 
     Ok(())
+}
+
+fn parse_time_to_seconds(time_str: &str) -> Result<f64, String> {
+    // 00:00:00,000 形式をパース
+    let parts: Vec<&str> = time_str.split(':').collect();
+    if parts.len() != 3 {
+        return Err(format!("無効な時間形式です: {}", time_str));
+    }
+
+    let hours: f64 = parts[0].parse().map_err(|_| "時間のパースに失敗しました")?;
+    let minutes: f64 = parts[1].parse().map_err(|_| "分のパースに失敗しました")?;
+
+    let sec_parts: Vec<&str> = parts[2].split(',').collect();
+    if sec_parts.len() != 2 {
+        // カンマがない場合（秒のみ）も考慮するか、厳密にするか。SRTはカンマ必須。
+        return Err(format!("無効な秒形式です（カンマが必要です）: {}", parts[2]));
+    }
+
+    let seconds: f64 = sec_parts[0].parse().map_err(|_| "秒のパースに失敗しました")?;
+    let millis: f64 = sec_parts[1].parse().map_err(|_| "ミリ秒のパースに失敗しました")?;
+
+    Ok(hours * 3600.0 + minutes * 60.0 + seconds + millis / 1000.0)
+}
+
+fn format_seconds_to_time(total_seconds: f64) -> String {
+    let hours = (total_seconds / 3600.0).floor() as u32;
+    let minutes = ((total_seconds % 3600.0) / 60.0).floor() as u32;
+    let seconds = (total_seconds % 60.0).floor() as u32;
+    let millis = ((total_seconds.fract()) * 1000.0).round() as u32;
+
+    format!("{:02}:{:02}:{:02},{:03}", hours, minutes, seconds, millis)
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]

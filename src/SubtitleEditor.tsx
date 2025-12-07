@@ -90,7 +90,11 @@ function SubtitleEditor({ srtFilePath, videoFilePath, onClose, onSave }: Subtitl
     const startSec = parseTimeToSeconds(entry.start_time);
     const endSec = parseTimeToSeconds(entry.end_time);
     const duration = endSec - startSec;
-    const midSec = startSec + duration / 2;
+
+    // 文字数の比率で時間を分割
+    const totalChars = beforeText.length + afterText.length;
+    const ratio = totalChars > 0 ? beforeText.length / totalChars : 0.5;
+    const midSec = startSec + (duration * ratio);
 
     const formatTime = (seconds: number): string => {
       const hrs = Math.floor(seconds / 3600);
