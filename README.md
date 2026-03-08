@@ -41,10 +41,13 @@ WHISPER_PATH=C:\Users\makun\Faster-Whisper-XXL\faster-whisper.exe
 
 # 作業ディレクトリ
 TMP_DIR=D:\Document\Program\movie2text\tmp
-OUT_DIR=D:\Document\Program\movie2text\out
+OUTPUT_DIR=D:\Document\Program\movie2text\out
 ```
 
 `.env.example` をコピーして編集することもできます。
+
+設定変更の手順は [設定ガイド](/mnt/d/Document/Program/movie2text/docs/CONFIGURATION.md) にまとめています。
+ビルドから実行までの流れは [ビルドと実行手順](/mnt/d/Document/Program/movie2text/docs/BUILD_AND_RUN.md) にまとめています。
 
 ### 3. 依存関係のインストール
 
@@ -94,7 +97,7 @@ npm run tauri build
    - デバイス: CUDA
    - VAD（音声区間検出）有効
    - 出力形式: SRT
-   - 出力先: `OUT_DIR`
+   - 出力先: `OUTPUT_DIR`
 
 ## 技術スタック
 
@@ -121,6 +124,7 @@ movie2text/
 │   └── tauri.conf.json    # Tauri設定
 ├── tmp/                   # 一時ファイル（.gitignore）
 ├── out/                   # 出力SRTファイル（.gitignore）
+├── docs/                  # ドキュメント
 ├── .env                   # 環境設定（.gitignore）
 ├── .env.example           # 環境設定テンプレート
 └── package.json           # Node.js依存関係

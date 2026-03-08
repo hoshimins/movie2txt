@@ -336,7 +336,10 @@ function SubtitleEditor({ srtFilePath, videoFilePath, onClose, onSave }: Subtitl
   return (
     <div className="subtitle-editor">
       <div className="editor-header">
-        <h2>字幕編集</h2>
+        <div>
+          <p className="eyebrow">Editor</p>
+          <h2>字幕編集</h2>
+        </div>
         <div className="editor-actions">
           <button className="primary" onClick={handleSave} disabled={saving}>
             {saving ? "保存中..." : "保存"}
@@ -345,8 +348,8 @@ function SubtitleEditor({ srtFilePath, videoFilePath, onClose, onSave }: Subtitl
         </div>
       </div>
 
-      {error && <div className="error-message panel" style={{ borderColor: 'var(--error)' }}>{error}</div>}
-      {videoError && <div className="error-message panel" style={{ borderColor: 'var(--error)' }}>動画エラー: {videoError}</div>}
+      {error && <div className="error-message panel error-panel">{error}</div>}
+      {videoError && <div className="error-message panel error-panel">動画エラー: {videoError}</div>}
 
       <div className="editor-content">
         <div className="video-preview">
@@ -372,7 +375,7 @@ function SubtitleEditor({ srtFilePath, videoFilePath, onClose, onSave }: Subtitl
             <span className="video-time">
               {Math.floor(currentTime / 60)}:{String(Math.floor(currentTime % 60)).padStart(2, '0')}
             </span>
-            {videoLoaded && <span className="video-status" style={{ color: 'var(--success)' }}>✓ 準備完了</span>}
+            {videoLoaded && <span className="video-status">✓ 準備完了</span>}
           </div>
 
           {/* Timeline */}
@@ -440,7 +443,7 @@ function SubtitleEditor({ srtFilePath, videoFilePath, onClose, onSave }: Subtitl
               onClick={() => handleSeekToSubtitle(entry.index)}
             >
               <div className="subtitle-header">
-                <span className="subtitle-index" style={{ color: 'var(--accent-primary)' }}>#{entry.index}</span>
+                <span className="subtitle-index">#{entry.index}</span>
                 <div className="subtitle-time-inputs">
                   <input
                     type="text"
