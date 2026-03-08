@@ -1,7 +1,7 @@
-import { useState, useEffect } from "react";
-import { open } from "@tauri-apps/plugin-dialog";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
+import { open } from "@tauri-apps/plugin-dialog";
+import { useEffect, useState } from "react";
 import SubtitleEditor from "./SubtitleEditor";
 
 function App() {
@@ -119,6 +119,12 @@ function App() {
     setShowEditor(false);
   };
 
+  const selectedFileName = selectedFile ? selectedFile.split(/[\\/]/).pop() ?? selectedFile : "";
+  const outputFileName = srtFilePath ? srtFilePath.split(/[\\/]/).pop() ?? srtFilePath : "";
+  const statusLabel = isProcessing ? "処理中" : srtFilePath ? "完了" : selectedFile ? "待機中" : "未選択";
+  const logCount = logs.length;
+  const latestLog = logs.length > 0 ? logs[logs.length - 1] : "システムログがここに表示されます。";
+
   if (showEditor && srtFilePath) {
     return (
       <SubtitleEditor
@@ -131,19 +137,40 @@ function App() {
   }
 
   return (
-    <div className="container">
-      <h1>Movie2Text - 動画文字起こしツール</h1>
+    <div className="app-layout">
+      <header className="app-header">
+        <div>
+          <h1>Movie2Text</h1>
+        </div>
+        <div className={`status-pill ${isProcessing ? "is-busy" : srtFilePath ? "is-ready" : ""}`}>
+          <span className="status-dot" />
+          {statusLabel}
+        </div>
+      </header>
 
-      <div className="file-selector">
-        <button onClick={handleSelectFile} disabled={isProcessing}>
-          動画ファイルを選択
-        </button>
-        {selectedFile && <p className="selected-file">選択中: {selectedFile}</p>}
-      </div>
+      <div className="sidebar">
+        <section className="panel hero-panel">
+          <h2>動画ファイル</h2>
+          <button className="primary hero-button" onClick={handleSelectFile} disabled={isProcessing}>
+            動画を選択
+          </button>
+          <div className="selected-file-card" title={selectedFile || "ファイルが選択されていません"}>
+            <span className="selected-file-label">選択中</span>
+            <strong>{selectedFileName || "ファイルが選択されていません"}</strong>
+            <span className="selected-file-path">{selectedFile || "mp4 / mov / mkv / avi / flv / wmv"}</span>
+          </div>
+        </section>
 
-      <div className="settings">
-        <label htmlFor="maxLineWidth">
-          1行あたりの最大文字数:
+        <section className="panel settings-panel">
+          <div className="panel-heading">
+            <div>
+              <h3>設定</h3>
+            </div>
+            <span className="metric-chip">{maxLineWidth === 0 ? "無制限" : `${maxLineWidth} 文字`}</span>
+          </div>
+          <label className="field-label" htmlFor="maxLineWidth">
+            1行あたりの最大文字数
+          </label>
           <input
             id="maxLineWidth"
             type="number"
@@ -151,44 +178,88 @@ function App() {
             value={maxLineWidth}
             onChange={handleMaxLineWidthChange}
             disabled={isProcessing}
-            className="max-line-width-input"
+            className="w-full"
           />
-          <span className="hint">(0 = 制限なし)</span>
-        </label>
+          <p className="field-hint">`0` を指定すると自動分割を無効化します。設定はこの PC の `localStorage` に保存されます。</p>
+          <button
+            className="primary w-full"
+            onClick={handleStartTranscription}
+            disabled={!selectedFile || isProcessing}
+          >
+            {isProcessing ? "文字起こし中..." : "字幕を生成"}
+          </button>
+        </section>
+
+        <section className="stats-grid">
+          <article className="panel stat-card">
+            <span className="stat-label">ログ</span>
+            <strong>{logCount}</strong>
+            <span className="stat-meta">件</span>
+          </article>
+          <article className="panel stat-card">
+            <span className="stat-label">出力</span>
+            <strong>{outputFileName || "未生成"}</strong>
+            <span className="stat-meta">SRT</span>
+          </article>
+        </section>
+
+        <section className="action-group">
+          <button
+            className="secondary-action"
+            onClick={handleEditSubtitles}
+            disabled={!srtFilePath}
+          >
+            字幕編集
+          </button>
+          <button
+            className="secondary-action"
+            onClick={handleOpenSrt}
+            disabled={!srtFilePath}
+          >
+            フォルダを開く
+          </button>
+        </section>
       </div>
 
-      <div className="controls">
-        <button
-          onClick={handleStartTranscription}
-          disabled={!selectedFile || isProcessing}
-        >
-          {isProcessing ? "処理中..." : "変換開始"}
-        </button>
-      </div>
+      <main className="main-content">
+        <section className="panel overview-panel">
+          <div className="overview-copy">
+            <h2>状態</h2>
+          </div>
+          <div className="overview-cards">
+            <article className="overview-card">
+              <span>動画</span>
+              <strong>{selectedFileName || "未選択"}</strong>
+            </article>
+            <article className="overview-card">
+              <span>文字数制限</span>
+              <strong>{maxLineWidth === 0 ? "無制限" : `${maxLineWidth} 文字`}</strong>
+            </article>
+            <article className="overview-card">
+              <span>出力</span>
+              <strong>{outputFileName || "未生成"}</strong>
+            </article>
+          </div>
+        </section>
 
-      <div className="logs">
-        <h3>処理ログ:</h3>
-        <textarea
-          readOnly
-          value={logs.join("\n")}
-          placeholder="ログがここに表示されます..."
-        />
-      </div>
-
-      <div className="output">
-        <button
-          onClick={handleEditSubtitles}
-          disabled={!srtFilePath}
-        >
-          字幕を編集
-        </button>
-        <button
-          onClick={handleOpenSrt}
-          disabled={!srtFilePath}
-        >
-          SRTファイルを開く
-        </button>
-      </div>
+        <section className="panel logs-container">
+          <div className="logs-toolbar">
+            <div>
+              <div className="logs-header">System Logs</div>
+              <p className="logs-subtitle">{latestLog}</p>
+            </div>
+            <button onClick={() => setLogs([])} disabled={isProcessing || logs.length === 0}>
+              ログをクリア
+            </button>
+          </div>
+          <textarea
+            className="logs-display"
+            readOnly
+            value={logs.join("\n")}
+            placeholder="システムログがここに表示されます..."
+          />
+        </section>
+      </main>
     </div>
   );
 }
