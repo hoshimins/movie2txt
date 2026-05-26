@@ -1,12 +1,283 @@
-use std::path::{Path, PathBuf};
-use std::process::Command;
+use crate::application::{
+    create_silence_cut_for_loaded_project, detect_silence_for_project,
+    generate_highlight_request_for_project, import_highlight_candidates_from_file,
+    progress_payload, run_preparation_job, run_ytdlp_update,
+};
+use crate::domain::{
+    AppSettings, ClipMarker, DownloadSource, HighlightRequestBundle, HighlightRequestOptions,
+    JobId, JobPhase, JobStatus, PreparationOptions, Project, ProjectSnapshot, ProjectSummary,
+    SilenceAnalysis, SilenceCutResult, SilenceCutSettings, SubtitleDocument,
+};
+use crate::infrastructure::{SystemProcessRunner, ToolResolver};
+use crate::storage::ProjectRepository;
+use std::collections::HashMap;
 use std::env;
 use std::fs;
-use tauri::{AppHandle, Emitter};
-use serde::{Deserialize, Serialize};
+use std::path::{Path, PathBuf};
+use std::process::Command;
+use std::sync::{
+    atomic::{AtomicBool, Ordering},
+    Arc, Mutex,
+};
+use subtitle_processing::{apply_character_limit_to_content, parse_srt, render_srt, SubtitleEntry};
+use tauri::{AppHandle, Emitter, Manager, State};
+use uuid::Uuid;
 
-fn get_env_var(key: &str) -> Result<String, String> {
-    env::var(key).map_err(|_| format!("環境変数 {} が設定されていません", key))
+#[derive(Default)]
+pub struct JobRegistry {
+    jobs: Mutex<HashMap<String, Arc<AtomicBool>>>,
+}
+
+impl JobRegistry {
+    fn insert(&self, job_id: String, cancelled: Arc<AtomicBool>) -> Result<(), String> {
+        self.jobs
+            .lock()
+            .map_err(|_| "ジョブ状態のロックに失敗しました".to_string())?
+            .insert(job_id, cancelled);
+        Ok(())
+    }
+
+    fn cancel(&self, job_id: &str) -> Result<(), String> {
+        let jobs = self
+            .jobs
+            .lock()
+            .map_err(|_| "ジョブ状態のロックに失敗しました".to_string())?;
+        let Some(cancelled) = jobs.get(job_id) else {
+            return Err("指定されたジョブが見つかりません".to_string());
+        };
+        cancelled.store(true, Ordering::SeqCst);
+        Ok(())
+    }
+
+    fn remove(&self, job_id: &str) {
+        if let Ok(mut jobs) = self.jobs.lock() {
+            jobs.remove(job_id);
+        }
+    }
+}
+
+#[tauri::command]
+pub async fn create_project(
+    app: AppHandle,
+    name: String,
+    source: DownloadSource,
+) -> Result<Project, String> {
+    repository_for(&app)?.create_project(name, source)
+}
+
+#[tauri::command]
+pub async fn list_projects(app: AppHandle) -> Result<Vec<ProjectSummary>, String> {
+    repository_for(&app)?.list_projects()
+}
+
+#[tauri::command]
+pub async fn open_project(app: AppHandle, project_id: String) -> Result<ProjectSnapshot, String> {
+    repository_for(&app)?.open_project(&project_id)
+}
+
+#[tauri::command]
+pub async fn start_preparation_job(
+    app: AppHandle,
+    registry: State<'_, JobRegistry>,
+    project_id: String,
+    options: PreparationOptions,
+) -> Result<JobId, String> {
+    let repository = repository_for(&app)?;
+    let settings = repository.load_settings()?;
+    let resource_dir = app.path().resource_dir().ok();
+    let job_id = Uuid::new_v4().to_string();
+    let cancelled = Arc::new(AtomicBool::new(false));
+    registry.insert(job_id.clone(), cancelled.clone())?;
+
+    let app_for_task = app.clone();
+    let job_id_for_task = job_id.clone();
+    let project_id_for_task = project_id.clone();
+    tauri::async_runtime::spawn(async move {
+        let runner = SystemProcessRunner;
+        let emit_progress = |phase: JobPhase, status: JobStatus, message: String| {
+            let payload = progress_payload(
+                &job_id_for_task,
+                &project_id_for_task,
+                phase,
+                status,
+                message,
+            );
+            let _ = app_for_task.emit("job-progress", payload);
+        };
+
+        let result = run_preparation_job(
+            repository.clone(),
+            project_id_for_task.clone(),
+            options,
+            settings,
+            resource_dir,
+            &runner,
+            cancelled,
+            &emit_progress,
+        );
+
+        match result {
+            Ok(project) => {
+                let _ = app_for_task.emit("project-updated", project.id);
+            }
+            Err(error) => {
+                let phase = if error.contains("キャンセル") {
+                    JobPhase::Cancelled
+                } else {
+                    JobPhase::Failed
+                };
+                let status = if matches!(&phase, JobPhase::Cancelled) {
+                    JobStatus::Cancelled
+                } else {
+                    JobStatus::Failed
+                };
+                emit_progress(phase, status, error);
+            }
+        }
+
+        if let Some(registry) = app_for_task.try_state::<JobRegistry>() {
+            registry.remove(&job_id_for_task);
+        }
+    });
+
+    Ok(JobId { id: job_id })
+}
+
+#[tauri::command]
+pub async fn cancel_job(registry: State<'_, JobRegistry>, job_id: String) -> Result<(), String> {
+    registry.cancel(&job_id)
+}
+
+#[tauri::command]
+pub async fn read_subtitles(
+    app: AppHandle,
+    project_id: String,
+) -> Result<SubtitleDocument, String> {
+    Ok(repository_for(&app)?.open_project(&project_id)?.subtitles)
+}
+
+#[tauri::command]
+pub async fn save_subtitles(
+    app: AppHandle,
+    project_id: String,
+    entries: Vec<SubtitleEntry>,
+) -> Result<Project, String> {
+    let project = repository_for(&app)?.save_subtitles(&project_id, &entries)?;
+    app.emit("project-updated", project.id.clone())
+        .map_err(|e| format!("プロジェクト更新通知に失敗しました: {}", e))?;
+    Ok(project)
+}
+
+#[tauri::command]
+pub async fn save_clip_markers(
+    app: AppHandle,
+    project_id: String,
+    markers: Vec<ClipMarker>,
+) -> Result<Project, String> {
+    let project = repository_for(&app)?.save_markers(&project_id, markers)?;
+    app.emit("project-updated", project.id.clone())
+        .map_err(|e| format!("プロジェクト更新通知に失敗しました: {}", e))?;
+    Ok(project)
+}
+
+#[tauri::command]
+pub async fn detect_silence(
+    app: AppHandle,
+    project_id: String,
+    settings: SilenceCutSettings,
+) -> Result<SilenceAnalysis, String> {
+    let repository = repository_for(&app)?;
+    let resolver = ToolResolver::new(app.path().resource_dir().ok(), repository.load_settings()?);
+    let runner = SystemProcessRunner;
+    let cancelled = Arc::new(AtomicBool::new(false));
+    let emit_progress = |phase: JobPhase, status: JobStatus, message: String| {
+        let payload = progress_payload("manual", &project_id, phase, status, message);
+        let _ = app.emit("job-progress", payload);
+    };
+
+    detect_silence_for_project(
+        &repository,
+        &project_id,
+        settings,
+        &resolver,
+        &runner,
+        cancelled,
+        &emit_progress,
+    )
+}
+
+#[tauri::command]
+pub async fn create_silence_cut(
+    app: AppHandle,
+    project_id: String,
+    settings: SilenceCutSettings,
+) -> Result<SilenceCutResult, String> {
+    let repository = repository_for(&app)?;
+    let resolver = ToolResolver::new(app.path().resource_dir().ok(), repository.load_settings()?);
+    let runner = SystemProcessRunner;
+    let cancelled = Arc::new(AtomicBool::new(false));
+    let emit_progress = |phase: JobPhase, status: JobStatus, message: String| {
+        let payload = progress_payload("manual", &project_id, phase, status, message);
+        let _ = app.emit("job-progress", payload);
+    };
+
+    let result = create_silence_cut_for_loaded_project(
+        &repository,
+        &project_id,
+        settings,
+        &resolver,
+        &runner,
+        cancelled,
+        &emit_progress,
+    )?;
+    app.emit("project-updated", project_id)
+        .map_err(|e| format!("プロジェクト更新通知に失敗しました: {}", e))?;
+    Ok(result)
+}
+
+#[tauri::command]
+pub async fn generate_highlight_request(
+    app: AppHandle,
+    project_id: String,
+    options: HighlightRequestOptions,
+) -> Result<HighlightRequestBundle, String> {
+    let repository = repository_for(&app)?;
+    let bundle = generate_highlight_request_for_project(&repository, &project_id, options)?;
+    app.emit("project-updated", project_id)
+        .map_err(|e| format!("プロジェクト更新通知に失敗しました: {}", e))?;
+    Ok(bundle)
+}
+
+#[tauri::command]
+pub async fn import_highlight_candidates(
+    _app: AppHandle,
+    _project_id: String,
+    file_path: String,
+) -> Result<Vec<ClipMarker>, String> {
+    import_highlight_candidates_from_file(&file_path)
+}
+
+#[tauri::command]
+pub async fn get_app_settings(app: AppHandle) -> Result<AppSettings, String> {
+    repository_for(&app)?.load_settings()
+}
+
+#[tauri::command]
+pub async fn update_app_settings(app: AppHandle, settings: AppSettings) -> Result<(), String> {
+    repository_for(&app)?.save_settings(&settings)
+}
+
+#[tauri::command]
+pub async fn update_ytdlp(app: AppHandle) -> Result<(), String> {
+    let repository = repository_for(&app)?;
+    let settings = repository.load_settings()?;
+    let resolver = ToolResolver::new(app.path().resource_dir().ok(), settings);
+    let runner = SystemProcessRunner;
+    let cancelled = Arc::new(AtomicBool::new(false));
+
+    run_ytdlp_update(&resolver, &runner, cancelled, &mut |line| {
+        let _ = emit_log(&app, &line);
+    })
 }
 
 #[tauri::command]
@@ -15,20 +286,17 @@ pub async fn start_transcription(
     file_path: String,
     max_line_width: Option<u32>,
 ) -> Result<String, String> {
-    // 環境変数から設定を読み取る
     let ffmpeg_path = get_env_var("FFMPEG_PATH")?;
     let whisper_path = get_env_var("WHISPER_PATH")?;
     let tmp_dir = get_env_var("TMP_DIR")?;
     let out_dir = get_env_var("OUTPUT_DIR")?;
 
-    // パスをPathBufに変換
     let tmp_dir = PathBuf::from(&tmp_dir);
     let out_dir = PathBuf::from(&out_dir);
 
-    // ディレクトリの存在確認と作成
-    std::fs::create_dir_all(&tmp_dir)
+    fs::create_dir_all(&tmp_dir)
         .map_err(|e| format!("tmpディレクトリの作成に失敗しました: {}", e))?;
-    std::fs::create_dir_all(&out_dir)
+    fs::create_dir_all(&out_dir)
         .map_err(|e| format!("outディレクトリの作成に失敗しました: {}", e))?;
 
     let input_path = Path::new(&file_path);
@@ -37,23 +305,26 @@ pub async fn start_transcription(
         .and_then(|s| s.to_str())
         .ok_or("ファイル名の取得に失敗しました")?;
 
-    // 中間wavファイルのパス
     let wav_path = tmp_dir.join(format!("{}.wav", file_stem));
     let wav_path_str = wav_path
         .to_str()
         .ok_or("wavファイルパスの変換に失敗しました")?;
 
-    // Step 1: ffmpeg で 16kHz mono に変換
     emit_log(&app, "ffmpeg処理を開始します...")?;
 
     let mut ffmpeg_cmd = Command::new(&ffmpeg_path);
-    ffmpeg_cmd.args(&[
-        "-i", &file_path,
+    ffmpeg_cmd.args([
+        "-i",
+        &file_path,
         "-vn",
-        "-ar", "16000",
-        "-ac", "1",
-        "-acodec", "pcm_s16le",
-        "-af", "aresample=async=1",
+        "-ar",
+        "16000",
+        "-ac",
+        "1",
+        "-acodec",
+        "pcm_s16le",
+        "-af",
+        "aresample=async=1",
         "-y",
         wav_path_str,
     ]);
@@ -74,15 +345,12 @@ pub async fn start_transcription(
     }
 
     emit_log(&app, "ffmpeg処理が完了しました")?;
-
-    // Step 2: faster-whisper で文字起こし
     emit_log(&app, "Whisper処理を開始します...")?;
 
-    // 絶対パスを取得（存在する場合）
     let out_dir_absolute = if out_dir.is_absolute() {
         out_dir.clone()
     } else {
-        std::env::current_dir()
+        env::current_dir()
             .map_err(|e| format!("カレントディレクトリの取得に失敗しました: {}", e))?
             .join(&out_dir)
     };
@@ -91,24 +359,23 @@ pub async fn start_transcription(
         .to_str()
         .ok_or("出力ディレクトリパスの変換に失敗しました")?;
 
-    emit_log(&app, &format!("出力ディレクトリ: {}", out_dir_str))?;
-
     let whisper_args = vec![
         wav_path_str,
-        "--model", "large-v3",
-        "--language", "ja",
-        "--device", "cuda",
-        "--compute_type", "float16",
-        "--vad_filter", "True",
-        "--output_format", "srt",
-        "--output_dir", out_dir_str,
+        "--model",
+        "large-v3",
+        "--language",
+        "ja",
+        "--device",
+        "cuda",
+        "--compute_type",
+        "float16",
+        "--vad_filter",
+        "True",
+        "--output_format",
+        "srt",
+        "--output_dir",
+        out_dir_str,
     ];
-
-    if let Some(width) = max_line_width {
-        if width > 0 {
-            emit_log(&app, &format!("1行あたりの最大文字数: {}", width))?;
-        }
-    }
 
     let mut whisper_cmd = Command::new(&whisper_path);
     whisper_cmd.args(&whisper_args);
@@ -125,28 +392,28 @@ pub async fn start_transcription(
 
     emit_log(&app, "Whisper処理が完了しました")?;
 
-    // 出力されたSRTファイルのパス
     let srt_path = out_dir_absolute.join(format!("{}.srt", file_stem));
     let srt_path_str = srt_path
         .to_str()
         .ok_or("SRTファイルパスの変換に失敗しました")?
         .to_string();
 
-    // SRTファイルの存在を確認（終了コードではなくファイルの存在で判断）
     if !srt_path.exists() {
         let stderr = String::from_utf8_lossy(&whisper_output.stderr);
         let stdout = String::from_utf8_lossy(&whisper_output.stdout);
-        return Err(format!("SRTファイルが生成されませんでした:\nSTDERR: {}\nSTDOUT: {}", stderr, stdout));
+        return Err(format!(
+            "SRTファイルが生成されませんでした:\nSTDERR: {}\nSTDOUT: {}",
+            stderr, stdout
+        ));
     }
 
-    emit_log(&app, &format!("SRTファイルを生成しました: {}", srt_path_str))?;
-
-    // max_line_widthが指定されている場合、日本語対応の文字数制限を適用
     if let Some(width) = max_line_width {
         if width > 0 {
-            emit_log(&app, "文字数制限を適用しています...")?;
-            apply_character_limit(&srt_path_str, width as usize)?;
-            emit_log(&app, "文字数制限の適用が完了しました")?;
+            let content = fs::read_to_string(&srt_path_str)
+                .map_err(|e| format!("SRTファイルの読み込みに失敗しました: {}", e))?;
+            let adjusted = apply_character_limit_to_content(&content, width as usize)?;
+            fs::write(&srt_path_str, adjusted)
+                .map_err(|e| format!("SRTファイルの保存に失敗しました: {}", e))?;
         }
     }
 
@@ -171,152 +438,6 @@ pub async fn open_srt_file(file_path: String) -> Result<(), String> {
     Ok(())
 }
 
-fn emit_log(app: &AppHandle, message: &str) -> Result<(), String> {
-    app.emit("transcription-log", message)
-        .map_err(|e| format!("ログの送信に失敗しました: {}", e))
-}
-
-/// テキストを指定文字数で分割する
-fn split_japanese_text(text: &str, max_chars: usize) -> Vec<String> {
-    // 既存の改行を取り除いて1行にする
-    let text = text.replace('\n', "").replace('\r', "");
-
-    let mut lines = Vec::new();
-    let chars: Vec<char> = text.chars().collect();
-    let mut i = 0;
-
-    while i < chars.len() {
-        let end = (i + max_chars).min(chars.len());
-        let line: String = chars[i..end].iter().collect();
-        lines.push(line);
-        i = end;
-    }
-
-    if lines.is_empty() {
-        vec![text.to_string()]
-    } else {
-        lines
-    }
-}
-
-/// SRTファイルに文字数制限を適用する（時間を分割して適用）
-fn apply_character_limit(file_path: &str, max_chars: usize) -> Result<(), String> {
-    // SRTファイルを読み込む
-    let content = fs::read_to_string(file_path)
-        .map_err(|e| format!("SRTファイルの読み込みに失敗しました: {}", e))?;
-
-    let entries = parse_srt(&content)?;
-    let mut new_entries = Vec::new();
-    let mut current_id = 1;
-
-    for entry in entries {
-        // 時間をパース
-        let start_seconds = parse_time_to_seconds(&entry.start_time)?;
-        let end_seconds = parse_time_to_seconds(&entry.end_time)?;
-        let duration = end_seconds - start_seconds;
-
-        // テキストを分割
-        let lines = split_japanese_text(&entry.text, max_chars);
-
-        // 全文字数を計算（比率計算用）
-        let total_chars: usize = lines.iter().map(|s| s.chars().count()).sum();
-
-        if total_chars == 0 {
-             new_entries.push(SubtitleEntry {
-                index: current_id,
-                start_time: entry.start_time,
-                end_time: entry.end_time,
-                text: entry.text,
-            });
-            current_id += 1;
-            continue;
-        }
-
-        let mut current_start = start_seconds;
-
-        for (i, line) in lines.iter().enumerate() {
-            let char_count = line.chars().count();
-            // 持続時間を文字数比率で配分
-            let ratio = char_count as f64 / total_chars as f64;
-            let split_duration = duration * ratio;
-
-            let mut current_end = current_start + split_duration;
-
-            // 最後のセグメントは元の終了時間に合わせる（誤差防止）
-            if i == lines.len() - 1 {
-                current_end = end_seconds;
-            }
-
-            new_entries.push(SubtitleEntry {
-                index: current_id,
-                start_time: format_seconds_to_time(current_start),
-                end_time: format_seconds_to_time(current_end),
-                text: line.clone(),
-            });
-
-            current_id += 1;
-            current_start = current_end;
-        }
-    }
-
-    // 新しいSRTファイルを書き込む
-    let mut content = String::new();
-    for entry in new_entries {
-        content.push_str(&entry.index.to_string());
-        content.push('\n');
-        content.push_str(&entry.start_time);
-        content.push_str(" --> ");
-        content.push_str(&entry.end_time);
-        content.push('\n');
-        content.push_str(&entry.text);
-        content.push_str("\n\n");
-    }
-
-    fs::write(file_path, content)
-        .map_err(|e| format!("SRTファイルの保存に失敗しました: {}", e))?;
-
-    Ok(())
-}
-
-fn parse_time_to_seconds(time_str: &str) -> Result<f64, String> {
-    // 00:00:00,000 形式をパース
-    let parts: Vec<&str> = time_str.split(':').collect();
-    if parts.len() != 3 {
-        return Err(format!("無効な時間形式です: {}", time_str));
-    }
-
-    let hours: f64 = parts[0].parse().map_err(|_| "時間のパースに失敗しました")?;
-    let minutes: f64 = parts[1].parse().map_err(|_| "分のパースに失敗しました")?;
-
-    let sec_parts: Vec<&str> = parts[2].split(',').collect();
-    if sec_parts.len() != 2 {
-        // カンマがない場合（秒のみ）も考慮するか、厳密にするか。SRTはカンマ必須。
-        return Err(format!("無効な秒形式です（カンマが必要です）: {}", parts[2]));
-    }
-
-    let seconds: f64 = sec_parts[0].parse().map_err(|_| "秒のパースに失敗しました")?;
-    let millis: f64 = sec_parts[1].parse().map_err(|_| "ミリ秒のパースに失敗しました")?;
-
-    Ok(hours * 3600.0 + minutes * 60.0 + seconds + millis / 1000.0)
-}
-
-fn format_seconds_to_time(total_seconds: f64) -> String {
-    let hours = (total_seconds / 3600.0).floor() as u32;
-    let minutes = ((total_seconds % 3600.0) / 60.0).floor() as u32;
-    let seconds = (total_seconds % 60.0).floor() as u32;
-    let millis = ((total_seconds.fract()) * 1000.0).round() as u32;
-
-    format!("{:02}:{:02}:{:02},{:03}", hours, minutes, seconds, millis)
-}
-
-#[derive(Debug, Serialize, Deserialize, Clone)]
-pub struct SubtitleEntry {
-    pub index: usize,
-    pub start_time: String,
-    pub end_time: String,
-    pub text: String,
-}
-
 #[tauri::command]
 pub async fn read_srt_file(file_path: String) -> Result<Vec<SubtitleEntry>, String> {
     let content = fs::read_to_string(&file_path)
@@ -325,54 +446,27 @@ pub async fn read_srt_file(file_path: String) -> Result<Vec<SubtitleEntry>, Stri
     parse_srt(&content)
 }
 
-fn parse_srt(content: &str) -> Result<Vec<SubtitleEntry>, String> {
-    let mut entries = Vec::new();
-
-    // Windows/Unix両方の改行コードに対応
-    let content = content.replace("\r\n", "\n");
-    let blocks: Vec<&str> = content.split("\n\n").filter(|s| !s.trim().is_empty()).collect();
-
-    for block in blocks.iter() {
-        let lines: Vec<&str> = block.lines().collect();
-        if lines.len() < 3 {
-            continue;
-        }
-
-        let index = lines[0].trim().parse::<usize>()
-            .map_err(|_| format!("インデックスのパースに失敗しました: {}", lines[0]))?;
-
-        let time_parts: Vec<&str> = lines[1].split(" --> ").collect();
-        if time_parts.len() != 2 {
-            continue;
-        }
-
-        let start_time = time_parts[0].trim().to_string();
-        let end_time = time_parts[1].trim().to_string();
-        let text = lines[2..].join("\n");
-
-        entries.push(SubtitleEntry {
-            index,
-            start_time,
-            end_time,
-            text,
-        });
-    }
-
-    Ok(entries)
-}
-
 #[tauri::command]
 pub async fn save_srt_file(file_path: String, entries: Vec<SubtitleEntry>) -> Result<(), String> {
-    let mut content = String::new();
-
-    for entry in entries {
-        content.push_str(&format!("{}\n", entry.index));
-        content.push_str(&format!("{} --> {}\n", entry.start_time, entry.end_time));
-        content.push_str(&format!("{}\n\n", entry.text));
-    }
-
-    fs::write(&file_path, content)
+    fs::write(&file_path, render_srt(&entries))
         .map_err(|e| format!("SRTファイルの保存に失敗しました: {}", e))?;
 
     Ok(())
+}
+
+fn repository_for(app: &AppHandle) -> Result<ProjectRepository, String> {
+    let app_data_dir = app
+        .path()
+        .app_data_dir()
+        .map_err(|e| format!("アプリデータディレクトリの取得に失敗しました: {}", e))?;
+    Ok(ProjectRepository::new(app_data_dir))
+}
+
+fn get_env_var(key: &str) -> Result<String, String> {
+    env::var(key).map_err(|_| format!("環境変数 {} が設定されていません", key))
+}
+
+fn emit_log(app: &AppHandle, message: &str) -> Result<(), String> {
+    app.emit("transcription-log", message)
+        .map_err(|e| format!("ログの送信に失敗しました: {}", e))
 }
