@@ -1,6 +1,9 @@
 import { invoke } from "@tauri-apps/api/core";
 import type {
   AppSettings,
+  AudioMergePreview,
+  AudioMergeTarget,
+  AudioSplitPreview,
   ClipMarker,
   DownloadSource,
   HighlightRequestBundle,
@@ -31,6 +34,30 @@ export function openProject(projectId: string) {
 
 export function startPreparationJob(projectId: string, options: PreparationOptions) {
   return invoke<JobId>("start_preparation_job", { projectId, options });
+}
+
+export function startMediaDownloadJob(projectId: string) {
+  return invoke<JobId>("start_media_download_job", { projectId });
+}
+
+export function previewAudioSplit(projectId: string, splitMinutes: number) {
+  return invoke<AudioSplitPreview>("preview_audio_split", { projectId, splitMinutes });
+}
+
+export function startAudioSplitJob(projectId: string, splitMinutes: number) {
+  return invoke<JobId>("start_audio_split_job", { projectId, splitMinutes });
+}
+
+export function scanAudioMerge(sourceDir: string) {
+  return invoke<AudioMergePreview>("scan_audio_merge", { sourceDir });
+}
+
+export function startAudioMergeJob(projectId: string, target: AudioMergeTarget, sourceDir: string) {
+  return invoke<JobId>("start_audio_merge_job", { projectId, target, sourceDir });
+}
+
+export function startVocalsTranscriptionJob(projectId: string, maxLineWidth?: number | null) {
+  return invoke<JobId>("start_vocals_transcription_job", { projectId, maxLineWidth });
 }
 
 export function cancelJob(jobId: string) {
@@ -75,4 +102,8 @@ export function updateAppSettings(settings: AppSettings) {
 
 export function updateYtdlp() {
   return invoke<void>("update_ytdlp");
+}
+
+export function openPath(path: string) {
+  return invoke<void>("open_path", { path });
 }

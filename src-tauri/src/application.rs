@@ -1,13 +1,16 @@
 use crate::domain::{
     build_timeline_map, map_subtitles_to_cut_timeline, parse_srt_timestamp_ms, AppSettings,
-    ClipMarker, DownloadMode, DownloadSource, HighlightCandidate, HighlightRequestBundle,
-    HighlightRequestOptions, JobPhase, JobProgress, JobStatus, MediaAsset, PreparationOptions,
-    Project, SilenceAnalysis, SilenceCutResult, SilenceCutSettings, SilenceSegment, TimelineMap,
+    AudioMergePreview, AudioMergeTarget, AudioSplitPreview, ClipMarker, DownloadMode,
+    DownloadSource, HighlightCandidate, HighlightRequestBundle, HighlightRequestOptions, JobPhase,
+    JobProgress, JobStatus, MediaAsset, PreparationOptions, Project, SilenceAnalysis,
+    SilenceCutResult, SilenceCutSettings, SilenceSegment, TimelineMap,
 };
 use crate::infrastructure::{file_name, ProcessRunner, ProcessSpec, Tool, ToolResolver};
 use crate::storage::{unix_timestamp, ProjectRepository};
 use std::fs;
+use std::io::Write;
 use std::path::{Path, PathBuf};
+use std::process::Command;
 use std::sync::{
     atomic::{AtomicBool, Ordering},
     Arc,
@@ -280,6 +283,374 @@ pub fn run_ytdlp_update(
         cancelled,
         progress,
     )
+}
+
+pub fn run_media_download_job(
+    repository: ProjectRepository,
+    project_id: String,
+    settings: AppSettings,
+    resource_dir: Option<PathBuf>,
+    runner: &dyn ProcessRunner,
+    cancelled: Arc<AtomicBool>,
+    progress: &ProgressSink<'_>,
+) -> Result<Project, String> {
+    progress(
+        JobPhase::Queued,
+        JobStatus::Running,
+        "URL動画取得ジョブを開始します".to_string(),
+    );
+
+    let mut project = repository.load_project(&project_id)?;
+    if !matches!(project.source, DownloadSource::Url { .. }) {
+        return Err("URLプロジェクトではありません".to_string());
+    }
+
+    let resolver = ToolResolver::new(resource_dir, settings);
+    let project_dir = PathBuf::from(&project.project_dir);
+    fs::create_dir_all(&project_dir)
+        .map_err(|e| format!("プロジェクトディレクトリの作成に失敗しました: {}", e))?;
+
+    let options = PreparationOptions {
+        max_line_width: None,
+        download_mode: DownloadMode::Video,
+        audio_format: None,
+        silence_cut: None,
+    };
+    let media_path = prepare_media(
+        &mut project,
+        &project_dir,
+        &options,
+        &resolver,
+        runner,
+        cancelled.clone(),
+        progress,
+    )?;
+
+    check_cancelled(&cancelled)?;
+    progress(
+        JobPhase::Download,
+        JobStatus::Running,
+        format!("動画取得が完了しました: {}", media_path.display()),
+    );
+
+    project.updated_at = unix_timestamp();
+    repository.save_project(&project)?;
+    progress(
+        JobPhase::Completed,
+        JobStatus::Succeeded,
+        "URL動画取得ジョブが完了しました".to_string(),
+    );
+    Ok(project)
+}
+
+pub fn build_audio_split_preview_for_project(
+    repository: &ProjectRepository,
+    project_id: &str,
+    split_minutes: u32,
+    resolver: &ToolResolver,
+) -> Result<AudioSplitPreview, String> {
+    if split_minutes == 0 {
+        return Err("分割長は1分以上にしてください".to_string());
+    }
+
+    let project = repository.load_project(project_id)?;
+    let media_path = project_media_path(&project)?;
+    let output_dir = audio_split_output_dir(&project, &media_path)?;
+    let duration_ms = probe_media_duration_ms(&media_path, resolver)?;
+    let split_ms = split_minutes as u64 * 60_000;
+    let part_count = duration_ms.div_ceil(split_ms).max(1) as u32;
+
+    Ok(AudioSplitPreview {
+        input_path: media_path.to_string_lossy().to_string(),
+        output_dir: output_dir.to_string_lossy().to_string(),
+        duration_ms,
+        split_minutes,
+        part_count,
+        output_exists: output_dir.exists(),
+    })
+}
+
+pub fn run_audio_split_job(
+    repository: ProjectRepository,
+    project_id: String,
+    split_minutes: u32,
+    settings: AppSettings,
+    resource_dir: Option<PathBuf>,
+    runner: &dyn ProcessRunner,
+    cancelled: Arc<AtomicBool>,
+    progress: &ProgressSink<'_>,
+) -> Result<Project, String> {
+    progress(
+        JobPhase::Queued,
+        JobStatus::Running,
+        "音声分割ジョブを開始します".to_string(),
+    );
+
+    let resolver = ToolResolver::new(resource_dir, settings);
+    let preview =
+        build_audio_split_preview_for_project(&repository, &project_id, split_minutes, &resolver)?;
+    if preview.output_exists {
+        return Err(format!(
+            "分割出力フォルダが既に存在します: {}",
+            preview.output_dir
+        ));
+    }
+
+    let mut project = repository.load_project(&project_id)?;
+    let media_path = PathBuf::from(&preview.input_path);
+    let output_dir = PathBuf::from(&preview.output_dir);
+    fs::create_dir_all(&output_dir)
+        .map_err(|e| format!("音声分割フォルダの作成に失敗しました: {}", e))?;
+
+    check_cancelled(&cancelled)?;
+    progress(
+        JobPhase::SplitAudio,
+        JobStatus::Running,
+        format!(
+            "{}分ごとに{}個の24-bit WAVへ分割します",
+            split_minutes, preview.part_count
+        ),
+    );
+
+    runner.run(
+        ProcessSpec {
+            program: resolver.resolve(Tool::Ffmpeg),
+            args: build_audio_split_ffmpeg_args(
+                &media_path,
+                &output_dir,
+                split_minutes as u64 * 60,
+            ),
+            working_dir: media_path.parent().map(Path::to_path_buf),
+        },
+        cancelled.clone(),
+        &mut |line| progress(JobPhase::SplitAudio, JobStatus::Running, line),
+    )?;
+
+    project.audio_split_dir = Some(output_dir.to_string_lossy().to_string());
+    project.updated_at = unix_timestamp();
+    repository.save_project(&project)?;
+
+    progress(
+        JobPhase::Completed,
+        JobStatus::Succeeded,
+        "音声分割ジョブが完了しました".to_string(),
+    );
+    Ok(project)
+}
+
+pub fn scan_audio_merge_folder(source_dir: &str) -> Result<AudioMergePreview, String> {
+    let source_path = PathBuf::from(source_dir);
+    if !source_path.is_dir() {
+        return Err("WAVフォルダが見つかりません".to_string());
+    }
+
+    let mut files = fs::read_dir(&source_path)
+        .map_err(|e| format!("WAVフォルダの読み込みに失敗しました: {}", e))?
+        .filter_map(Result::ok)
+        .map(|entry| entry.path())
+        .filter(|path| {
+            path.is_file()
+                && path
+                    .extension()
+                    .and_then(|value| value.to_str())
+                    .is_some_and(|ext| ext.eq_ignore_ascii_case("wav"))
+        })
+        .collect::<Vec<_>>();
+
+    files.sort_by(|left, right| {
+        natural_cmp(
+            &left
+                .file_name()
+                .map(|value| value.to_string_lossy())
+                .unwrap_or_default(),
+            &right
+                .file_name()
+                .map(|value| value.to_string_lossy())
+                .unwrap_or_default(),
+        )
+    });
+
+    Ok(AudioMergePreview {
+        source_dir: source_path.to_string_lossy().to_string(),
+        files: files
+            .into_iter()
+            .map(|path| path.to_string_lossy().to_string())
+            .collect(),
+    })
+}
+
+pub fn run_audio_merge_job(
+    repository: ProjectRepository,
+    project_id: String,
+    target: AudioMergeTarget,
+    source_dir: String,
+    settings: AppSettings,
+    resource_dir: Option<PathBuf>,
+    runner: &dyn ProcessRunner,
+    cancelled: Arc<AtomicBool>,
+    progress: &ProgressSink<'_>,
+) -> Result<Project, String> {
+    progress(
+        JobPhase::Queued,
+        JobStatus::Running,
+        "WAV結合ジョブを開始します".to_string(),
+    );
+
+    let preview = scan_audio_merge_folder(&source_dir)?;
+    if preview.files.is_empty() {
+        return Err("結合対象のWAVファイルがありません".to_string());
+    }
+
+    let mut project = repository.load_project(&project_id)?;
+    let project_dir = PathBuf::from(&project.project_dir);
+    let merged_dir = project_dir.join("derived").join("audio_merged");
+    fs::create_dir_all(&merged_dir)
+        .map_err(|e| format!("音声結合フォルダの作成に失敗しました: {}", e))?;
+
+    let (output_path, label) = match target {
+        AudioMergeTarget::Vocals => (merged_dir.join("vocals_merged.wav"), "ボーカル"),
+        AudioMergeTarget::Bgm => (merged_dir.join("bgm_merged.wav"), "BGM"),
+    };
+    let concat_path = merged_dir.join(match target {
+        AudioMergeTarget::Vocals => "vocals_concat.txt",
+        AudioMergeTarget::Bgm => "bgm_concat.txt",
+    });
+    write_concat_file(&concat_path, &preview.files)?;
+
+    check_cancelled(&cancelled)?;
+    progress(
+        JobPhase::MergeAudio,
+        JobStatus::Running,
+        format!("{}WAV {} 件を結合します", label, preview.files.len()),
+    );
+
+    let resolver = ToolResolver::new(resource_dir, settings);
+    runner.run(
+        ProcessSpec {
+            program: resolver.resolve(Tool::Ffmpeg),
+            args: build_audio_merge_ffmpeg_args(&concat_path, &output_path),
+            working_dir: Some(merged_dir.clone()),
+        },
+        cancelled.clone(),
+        &mut |line| progress(JobPhase::MergeAudio, JobStatus::Running, line),
+    )?;
+
+    match target {
+        AudioMergeTarget::Vocals => {
+            project.vocals_source_dir = Some(source_dir);
+            project.vocals_merged_path = Some(output_path.to_string_lossy().to_string());
+        }
+        AudioMergeTarget::Bgm => {
+            project.bgm_source_dir = Some(source_dir);
+            project.bgm_merged_path = Some(output_path.to_string_lossy().to_string());
+        }
+    }
+    project.updated_at = unix_timestamp();
+    repository.save_project(&project)?;
+
+    progress(
+        JobPhase::Completed,
+        JobStatus::Succeeded,
+        "WAV結合ジョブが完了しました".to_string(),
+    );
+    Ok(project)
+}
+
+pub fn run_vocals_transcription_job(
+    repository: ProjectRepository,
+    project_id: String,
+    max_line_width: Option<u32>,
+    settings: AppSettings,
+    resource_dir: Option<PathBuf>,
+    runner: &dyn ProcessRunner,
+    cancelled: Arc<AtomicBool>,
+    progress: &ProgressSink<'_>,
+) -> Result<Project, String> {
+    progress(
+        JobPhase::Queued,
+        JobStatus::Running,
+        "結合ボーカルから字幕生成を開始します".to_string(),
+    );
+
+    let mut project = repository.load_project(&project_id)?;
+    let vocals_path = project
+        .vocals_merged_path
+        .as_deref()
+        .map(PathBuf::from)
+        .ok_or_else(|| "ボーカル結合WAVがまだありません".to_string())?;
+    if !vocals_path.exists() {
+        return Err("ボーカル結合WAVが見つかりません".to_string());
+    }
+    let output_dir = PathBuf::from(&project.project_dir)
+        .join("derived")
+        .join("audio_merged");
+    fs::create_dir_all(&output_dir)
+        .map_err(|e| format!("字幕出力フォルダの作成に失敗しました: {}", e))?;
+
+    check_cancelled(&cancelled)?;
+    let resolver = ToolResolver::new(resource_dir, settings);
+    progress(
+        JobPhase::Transcribe,
+        JobStatus::Running,
+        "Whisper処理を開始します".to_string(),
+    );
+    runner.run(
+        ProcessSpec {
+            program: resolver.resolve(Tool::Whisper),
+            args: vec![
+                vocals_path.to_string_lossy().to_string(),
+                "--model".to_string(),
+                "large-v3".to_string(),
+                "--language".to_string(),
+                "ja".to_string(),
+                "--device".to_string(),
+                "cuda".to_string(),
+                "--compute_type".to_string(),
+                "float16".to_string(),
+                "--vad_filter".to_string(),
+                "True".to_string(),
+                "--output_format".to_string(),
+                "srt".to_string(),
+                "--output_dir".to_string(),
+                output_dir.to_string_lossy().to_string(),
+            ],
+            working_dir: Some(output_dir.clone()),
+        },
+        cancelled.clone(),
+        &mut |line| progress(JobPhase::Transcribe, JobStatus::Running, line),
+    )?;
+
+    check_cancelled(&cancelled)?;
+    progress(
+        JobPhase::Postprocess,
+        JobStatus::Running,
+        "字幕後処理を開始します".to_string(),
+    );
+    let srt_path = output_dir.join("vocals_merged.srt");
+    if !srt_path.exists() {
+        return Err("SRTファイルが生成されませんでした".to_string());
+    }
+    if let Some(width) = max_line_width {
+        if width > 0 {
+            let content = fs::read_to_string(&srt_path)
+                .map_err(|e| format!("SRTファイルの読み込みに失敗しました: {}", e))?;
+            let adjusted = apply_character_limit_to_content(&content, width as usize)?;
+            fs::write(&srt_path, adjusted)
+                .map_err(|e| format!("SRTファイルの保存に失敗しました: {}", e))?;
+        }
+    }
+
+    project.wav_path = Some(vocals_path.to_string_lossy().to_string());
+    project.subtitle_path = Some(srt_path.to_string_lossy().to_string());
+    project.updated_at = unix_timestamp();
+    repository.save_project(&project)?;
+
+    progress(
+        JobPhase::Completed,
+        JobStatus::Succeeded,
+        "結合ボーカルからの字幕生成が完了しました".to_string(),
+    );
+    Ok(project)
 }
 
 pub fn detect_silence_for_project(
@@ -757,6 +1128,176 @@ fn subtitle_duration_ms(path: &str) -> Result<u64, String> {
         .map(|entry| parse_srt_timestamp_ms(&entry.end_time))
         .transpose()?
         .ok_or_else(|| "SRTに字幕エントリがありません".to_string())
+}
+
+fn project_media_path(project: &Project) -> Result<PathBuf, String> {
+    project
+        .media_asset
+        .as_ref()
+        .map(|asset| PathBuf::from(&asset.path))
+        .or_else(|| match &project.source {
+            DownloadSource::LocalFile { path } => Some(PathBuf::from(path)),
+            DownloadSource::Url { .. } => None,
+        })
+        .ok_or_else(|| "分割対象の動画ファイルがありません".to_string())
+}
+
+fn audio_split_output_dir(project: &Project, media_path: &Path) -> Result<PathBuf, String> {
+    let stem = media_path
+        .file_stem()
+        .and_then(|value| value.to_str())
+        .ok_or_else(|| "動画ファイル名の取得に失敗しました".to_string())?;
+    Ok(PathBuf::from(&project.project_dir)
+        .join("derived")
+        .join("audio_splits")
+        .join(stem))
+}
+
+fn probe_media_duration_ms(media_path: &Path, resolver: &ToolResolver) -> Result<u64, String> {
+    let ffprobe_output = command_output(
+        &resolver.resolve_ffprobe(),
+        &[
+            "-v".to_string(),
+            "error".to_string(),
+            "-show_entries".to_string(),
+            "format=duration".to_string(),
+            "-of".to_string(),
+            "default=noprint_wrappers=1:nokey=1".to_string(),
+            media_path.to_string_lossy().to_string(),
+        ],
+    );
+
+    if let Ok(output) = ffprobe_output {
+        if output.status.success() {
+            let stdout = String::from_utf8_lossy(&output.stdout);
+            if let Ok(seconds) = stdout.trim().parse::<f64>() {
+                return Ok((seconds * 1_000.0).round() as u64);
+            }
+        }
+    }
+
+    let output = command_output(
+        &resolver.resolve(Tool::Ffmpeg),
+        &["-i".to_string(), media_path.to_string_lossy().to_string()],
+    )
+    .map_err(|e| format!("動画尺の取得に失敗しました: {}", e))?;
+    let mut lines = String::from_utf8_lossy(&output.stderr)
+        .lines()
+        .map(str::to_string)
+        .collect::<Vec<_>>();
+    lines.extend(
+        String::from_utf8_lossy(&output.stdout)
+            .lines()
+            .map(str::to_string),
+    );
+    parse_duration_from_output(&lines).ok_or_else(|| "動画尺を取得できませんでした".to_string())
+}
+
+fn command_output(program: &str, args: &[String]) -> Result<std::process::Output, String> {
+    let mut command = Command::new(program);
+    command.args(args);
+    #[cfg(target_os = "windows")]
+    {
+        use std::os::windows::process::CommandExt;
+        command.creation_flags(0x08000000);
+    }
+    command
+        .output()
+        .map_err(|e| format!("外部プロセスの実行に失敗しました: {}", e))
+}
+
+pub fn build_audio_split_ffmpeg_args(
+    input_path: &Path,
+    output_dir: &Path,
+    split_seconds: u64,
+) -> Vec<String> {
+    vec![
+        "-i".to_string(),
+        input_path.to_string_lossy().to_string(),
+        "-map".to_string(),
+        "0:a:0".to_string(),
+        "-vn".to_string(),
+        "-c:a".to_string(),
+        "pcm_s24le".to_string(),
+        "-f".to_string(),
+        "segment".to_string(),
+        "-segment_time".to_string(),
+        split_seconds.to_string(),
+        "-segment_start_number".to_string(),
+        "1".to_string(),
+        "-reset_timestamps".to_string(),
+        "1".to_string(),
+        "-y".to_string(),
+        output_dir
+            .join("part_%03d.wav")
+            .to_string_lossy()
+            .to_string(),
+    ]
+}
+
+pub fn build_audio_merge_ffmpeg_args(concat_path: &Path, output_path: &Path) -> Vec<String> {
+    vec![
+        "-f".to_string(),
+        "concat".to_string(),
+        "-safe".to_string(),
+        "0".to_string(),
+        "-i".to_string(),
+        concat_path.to_string_lossy().to_string(),
+        "-c:a".to_string(),
+        "pcm_s24le".to_string(),
+        "-y".to_string(),
+        output_path.to_string_lossy().to_string(),
+    ]
+}
+
+fn write_concat_file(path: &Path, files: &[String]) -> Result<(), String> {
+    let mut file =
+        fs::File::create(path).map_err(|e| format!("concatファイルの作成に失敗しました: {}", e))?;
+    for item in files {
+        let escaped = item.replace('\\', "/").replace('\'', "'\\''");
+        writeln!(file, "file '{}'", escaped)
+            .map_err(|e| format!("concatファイルの書き込みに失敗しました: {}", e))?;
+    }
+    Ok(())
+}
+
+fn natural_cmp(left: &str, right: &str) -> std::cmp::Ordering {
+    let mut left_iter = left.chars().peekable();
+    let mut right_iter = right.chars().peekable();
+
+    loop {
+        match (left_iter.peek(), right_iter.peek()) {
+            (None, None) => return std::cmp::Ordering::Equal,
+            (None, Some(_)) => return std::cmp::Ordering::Less,
+            (Some(_), None) => return std::cmp::Ordering::Greater,
+            (Some(left_char), Some(right_char)) => {
+                if left_char.is_ascii_digit() && right_char.is_ascii_digit() {
+                    let left_number = take_number(&mut left_iter);
+                    let right_number = take_number(&mut right_iter);
+                    let ordering = left_number.cmp(&right_number);
+                    if !ordering.is_eq() {
+                        return ordering;
+                    }
+                    continue;
+                }
+
+                let left_char = left_iter.next().unwrap().to_ascii_lowercase();
+                let right_char = right_iter.next().unwrap().to_ascii_lowercase();
+                let ordering = left_char.cmp(&right_char);
+                if !ordering.is_eq() {
+                    return ordering;
+                }
+            }
+        }
+    }
+}
+
+fn take_number(iter: &mut std::iter::Peekable<std::str::Chars<'_>>) -> u64 {
+    let mut value = String::new();
+    while iter.peek().is_some_and(|char| char.is_ascii_digit()) {
+        value.push(iter.next().unwrap());
+    }
+    value.parse::<u64>().unwrap_or(0)
 }
 
 fn find_downloaded_media(project_dir: &Path) -> Result<PathBuf, String> {

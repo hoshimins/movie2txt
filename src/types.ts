@@ -45,6 +45,11 @@ export interface Project {
   silenceCutSrtPath?: string | null;
   highlightRequestPath?: string | null;
   highlightCandidatesPath?: string | null;
+  audioSplitDir?: string | null;
+  vocalsSourceDir?: string | null;
+  bgmSourceDir?: string | null;
+  vocalsMergedPath?: string | null;
+  bgmMergedPath?: string | null;
   markers: ClipMarker[];
   createdAt: number;
   updatedAt: number;
@@ -117,6 +122,22 @@ export interface HighlightRequestBundle {
   candidateOutputPath: string;
 }
 
+export interface AudioSplitPreview {
+  inputPath: string;
+  outputDir: string;
+  durationMs: number;
+  splitMinutes: number;
+  partCount: number;
+  outputExists: boolean;
+}
+
+export interface AudioMergePreview {
+  sourceDir: string;
+  files: string[];
+}
+
+export type AudioMergeTarget = "vocals" | "bgm";
+
 export interface AppSettings {
   ytdlpPath?: string | null;
   ffmpegPath?: string | null;
@@ -138,6 +159,8 @@ export type JobPhase =
   | "postprocess"
   | "detect-silence"
   | "cut-silence"
+  | "split-audio"
+  | "merge-audio"
   | "generate-highlight-request"
   | "completed"
   | "failed"

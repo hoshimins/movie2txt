@@ -84,6 +84,27 @@ impl ToolResolver {
 
         tool.command_name().to_string()
     }
+
+    pub fn resolve_ffprobe(&self) -> String {
+        let ffmpeg = self.resolve(Tool::Ffmpeg);
+        let ffmpeg_path = PathBuf::from(&ffmpeg);
+        let ffprobe_file = if cfg!(target_os = "windows") {
+            "ffprobe.exe"
+        } else {
+            "ffprobe"
+        };
+
+        if ffmpeg_path.file_name().is_some() {
+            if let Some(parent) = ffmpeg_path.parent() {
+                let sibling = parent.join(ffprobe_file);
+                if sibling.exists() {
+                    return sibling.to_string_lossy().to_string();
+                }
+            }
+        }
+
+        "ffprobe".to_string()
+    }
 }
 
 #[derive(Debug, Clone)]

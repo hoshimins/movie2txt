@@ -9,9 +9,16 @@ import {
   cancelJob,
   createProject,
   getAppSettings,
+  openPath,
   listProjects,
   openProject,
+  previewAudioSplit,
+  scanAudioMerge,
+  startAudioMergeJob,
+  startAudioSplitJob,
+  startMediaDownloadJob,
   startPreparationJob,
+  startVocalsTranscriptionJob,
   updateAppSettings,
   updateYtdlp,
 } from "./api";
@@ -20,6 +27,9 @@ import { buildPreparationOptions } from "./prepareOptions";
 import SubtitleEditor from "./SubtitleEditor";
 import type {
   AppSettings,
+  AudioMergePreview,
+  AudioMergeTarget,
+  AudioSplitPreview,
   ClipMarker,
   DownloadMode,
   DownloadSource,
@@ -182,11 +192,13 @@ function ProjectPage() {
   const [silenceNoiseDb, setSilenceNoiseDb] = useState(-35);
   const [silenceDurationMs, setSilenceDurationMs] = useState(400);
   const [silencePaddingMs, setSilencePaddingMs] = useState(150);
+  const [activeProjectTab, setActiveProjectTab] = useState<"audio" | "subtitles">("audio");
   const settingsQuery = useQuery({ queryKey: ["settings"], queryFn: getAppSettings });
   const projectQuery = useQuery({
     queryKey: ["project", projectId],
     queryFn: () => openProject(projectId),
   });
+  const maxLineWidth = settingsQuery.data?.maxLineWidth ?? 23;
 
   useEffect(() => {
     const unlistenProgress = listen<JobProgress>("job-progress", (event) => {
@@ -212,6 +224,27 @@ function ProjectPage() {
     onSuccess: (job) => send({ type: "START", jobId: job.id, projectId }),
   });
 
+  const mediaDownloadMutation = useMutation({
+    mutationFn: () => startMediaDownloadJob(projectId),
+    onSuccess: (job) => send({ type: "START", jobId: job.id, projectId }),
+  });
+
+  const audioSplitMutation = useMutation({
+    mutationFn: (splitMinutes: number) => startAudioSplitJob(projectId, splitMinutes),
+    onSuccess: (job) => send({ type: "START", jobId: job.id, projectId }),
+  });
+
+  const audioMergeMutation = useMutation({
+    mutationFn: (input: { target: AudioMergeTarget; sourceDir: string }) =>
+      startAudioMergeJob(projectId, input.target, input.sourceDir),
+    onSuccess: (job) => send({ type: "START", jobId: job.id, projectId }),
+  });
+
+  const vocalsTranscriptionMutation = useMutation({
+    mutationFn: () => startVocalsTranscriptionJob(projectId, maxLineWidth),
+    onSuccess: (job) => send({ type: "START", jobId: job.id, projectId }),
+  });
+
   const cancelMutation = useMutation({
     mutationFn: (jobId: string) => cancelJob(jobId),
   });
@@ -219,7 +252,6 @@ function ProjectPage() {
   const updateYtdlpMutation = useMutation({ mutationFn: updateYtdlp });
 
   const snapshot = projectQuery.data;
-  const maxLineWidth = settingsQuery.data?.maxLineWidth ?? 23;
   const jobContext = state.context;
   const isRunning = state.matches("running");
 
@@ -337,12 +369,35 @@ function ProjectPage() {
         </section>
       </aside>
 
-      <section className="editor-shell">
-        {snapshot.project.subtitlePath && snapshot.project.mediaAsset ? (
+      <section className="editor-shell project-main-panel">
+        <div className="project-tabs">
+          <button className={activeProjectTab === "audio" ? "active" : ""} onClick={() => setActiveProjectTab("audio")}>
+            Audio Workflow
+          </button>
+          <button className={activeProjectTab === "subtitles" ? "active" : ""} onClick={() => setActiveProjectTab("subtitles")}>
+            Subtitle Editor
+          </button>
+        </div>
+
+        {activeProjectTab === "audio" ? (
+          <AudioWorkflow
+            snapshot={snapshot}
+            projectId={projectId}
+            isRunning={isRunning}
+            splitPending={audioSplitMutation.isPending}
+            mergePending={audioMergeMutation.isPending}
+            downloadPending={mediaDownloadMutation.isPending}
+            transcriptionPending={vocalsTranscriptionMutation.isPending}
+            onDownloadMedia={() => mediaDownloadMutation.mutate()}
+            onSplitAudio={(splitMinutes) => audioSplitMutation.mutate(splitMinutes)}
+            onMergeAudio={(target, sourceDir) => audioMergeMutation.mutate({ target, sourceDir })}
+            onTranscribeVocals={() => vocalsTranscriptionMutation.mutate()}
+          />
+        ) : snapshot.project.subtitlePath && projectMediaPath(snapshot) ? (
           <SubtitleEditor
             projectId={snapshot.project.id}
             srtFilePath={snapshot.project.subtitlePath}
-            videoFilePath={snapshot.project.mediaAsset.path}
+            videoFilePath={projectMediaPath(snapshot)!}
             initialMarkers={snapshot.project.markers}
             onClose={() => undefined}
             onSave={() => void queryClient.invalidateQueries({ queryKey: ["project", projectId] })}
@@ -360,6 +415,266 @@ function ClipMarkerDraft({ snapshot }: { snapshot: ProjectSnapshot }) {
     <div className="panel empty-state">
       <h2>字幕生成待ち</h2>
       <p>{snapshot.project.source.kind === "url" ? "準備ジョブを実行すると、ダウンロードした素材をそのまま字幕生成に渡します。" : "ローカル素材から字幕生成を開始してください。"}</p>
+    </div>
+  );
+}
+
+function AudioWorkflow({
+  snapshot,
+  projectId,
+  isRunning,
+  splitPending,
+  mergePending,
+  downloadPending,
+  transcriptionPending,
+  onDownloadMedia,
+  onSplitAudio,
+  onMergeAudio,
+  onTranscribeVocals,
+}: {
+  snapshot: ProjectSnapshot;
+  projectId: string;
+  isRunning: boolean;
+  splitPending: boolean;
+  mergePending: boolean;
+  downloadPending: boolean;
+  transcriptionPending: boolean;
+  onDownloadMedia: () => void;
+  onSplitAudio: (splitMinutes: number) => void;
+  onMergeAudio: (target: AudioMergeTarget, sourceDir: string) => void;
+  onTranscribeVocals: () => void;
+}) {
+  const [splitMinutes, setSplitMinutes] = useState(60);
+  const [vocalsSourceDir, setVocalsSourceDir] = useState(snapshot.project.vocalsSourceDir ?? "");
+  const [bgmSourceDir, setBgmSourceDir] = useState(snapshot.project.bgmSourceDir ?? "");
+  const mediaPath = projectMediaPath(snapshot);
+  const canSplit = Boolean(mediaPath);
+  const isBusy = isRunning || splitPending || mergePending || downloadPending || transcriptionPending;
+
+  useEffect(() => {
+    setVocalsSourceDir(snapshot.project.vocalsSourceDir ?? "");
+    setBgmSourceDir(snapshot.project.bgmSourceDir ?? "");
+  }, [snapshot.project.vocalsSourceDir, snapshot.project.bgmSourceDir]);
+
+  const splitPreviewQuery = useQuery<AudioSplitPreview>({
+    queryKey: ["audio-split-preview", projectId, splitMinutes, mediaPath],
+    queryFn: () => previewAudioSplit(projectId, splitMinutes),
+    enabled: canSplit && splitMinutes > 0,
+  });
+
+  const vocalsPreviewQuery = useQuery<AudioMergePreview>({
+    queryKey: ["audio-merge-preview", "vocals", vocalsSourceDir],
+    queryFn: () => scanAudioMerge(vocalsSourceDir),
+    enabled: Boolean(vocalsSourceDir),
+  });
+
+  const bgmPreviewQuery = useQuery<AudioMergePreview>({
+    queryKey: ["audio-merge-preview", "bgm", bgmSourceDir],
+    queryFn: () => scanAudioMerge(bgmSourceDir),
+    enabled: Boolean(bgmSourceDir),
+  });
+
+  const pickMergeFolder = async (target: AudioMergeTarget) => {
+    const selected = await open({
+      directory: true,
+      multiple: false,
+    });
+    if (typeof selected === "string") {
+      if (target === "vocals") {
+        setVocalsSourceDir(selected);
+      } else {
+        setBgmSourceDir(selected);
+      }
+    }
+  };
+
+  const splitPreview = splitPreviewQuery.data;
+  const splitBlocked = !canSplit || splitMinutes < 1 || Boolean(splitPreview?.outputExists) || splitPreviewQuery.isError;
+
+  return (
+    <div className="audio-workflow">
+      <section className="panel workflow-panel">
+        <div className="section-heading compact">
+          <div>
+            <p className="eyebrow">Audio Workflow</p>
+            <h2>動画取得と24-bit WAV分割</h2>
+          </div>
+          {snapshot.project.source.kind === "url" && !snapshot.project.mediaAsset && (
+            <button className="primary" onClick={onDownloadMedia} disabled={isBusy}>
+              {downloadPending ? "取得開始中..." : "URL動画を取得"}
+            </button>
+          )}
+        </div>
+
+        <dl className="metadata-list workflow-metadata">
+          <div><dt>Input</dt><dd title={mediaPath ?? ""}>{mediaPath ? fileName(mediaPath) : "動画取得後に分割できます"}</dd></div>
+          <div><dt>Format</dt><dd>24-bit WAV / 元サンプルレート・チャンネル維持</dd></div>
+        </dl>
+
+        <div className="workflow-grid">
+          <label>
+            分割長（分）
+            <input
+              type="number"
+              min={1}
+              step={1}
+              value={splitMinutes}
+              onChange={(event) => setSplitMinutes(Math.max(1, Number(event.target.value) || 1))}
+            />
+          </label>
+          <button
+            className="primary"
+            onClick={() => onSplitAudio(splitMinutes)}
+            disabled={isBusy || splitBlocked}
+          >
+            {splitPending ? "分割開始中..." : "音声分割を実行"}
+          </button>
+        </div>
+
+        {splitPreviewQuery.isLoading && canSplit && <p className="field-hint">分割プレビューを取得しています...</p>}
+        {splitPreviewQuery.error && <p className="error-text">{String(splitPreviewQuery.error)}</p>}
+        {splitPreview && (
+          <div className={splitPreview.outputExists ? "workflow-preview warning-preview" : "workflow-preview"}>
+            <PathRow label="出力先" path={splitPreview.outputDir} canOpen={splitPreview.outputExists} />
+            <div><span>動画尺</span><strong>{formatDuration(splitPreview.durationMs)}</strong></div>
+            <div><span>推定パート数</span><strong>{splitPreview.partCount} 件</strong></div>
+            <div><span>状態</span><strong>{splitPreview.outputExists ? "既に存在します" : "実行できます"}</strong></div>
+          </div>
+        )}
+      </section>
+
+      <section className="workflow-columns">
+        <MergePanel
+          title="ボーカルWAVを結合"
+          target="vocals"
+          sourceDir={vocalsSourceDir}
+          preview={vocalsPreviewQuery.data}
+          error={vocalsPreviewQuery.error}
+          isLoading={vocalsPreviewQuery.isLoading}
+          isBusy={isBusy}
+          pending={mergePending}
+          outputPath={snapshot.project.vocalsMergedPath}
+          onPickFolder={() => pickMergeFolder("vocals")}
+          onMerge={() => vocalsSourceDir && onMergeAudio("vocals", vocalsSourceDir)}
+        />
+        <MergePanel
+          title="BGM WAVを結合"
+          target="bgm"
+          sourceDir={bgmSourceDir}
+          preview={bgmPreviewQuery.data}
+          error={bgmPreviewQuery.error}
+          isLoading={bgmPreviewQuery.isLoading}
+          isBusy={isBusy}
+          pending={mergePending}
+          outputPath={snapshot.project.bgmMergedPath}
+          onPickFolder={() => pickMergeFolder("bgm")}
+          onMerge={() => bgmSourceDir && onMergeAudio("bgm", bgmSourceDir)}
+        />
+      </section>
+
+      <section className="panel workflow-panel">
+        <div className="section-heading compact">
+          <div>
+            <p className="eyebrow">Transcribe</p>
+            <h2>結合ボーカルから字幕生成</h2>
+          </div>
+          <button
+            className="primary"
+            onClick={onTranscribeVocals}
+            disabled={isBusy || !snapshot.project.vocalsMergedPath}
+          >
+            {transcriptionPending ? "字幕生成開始中..." : "結合ボーカルから字幕生成"}
+          </button>
+        </div>
+        <PathRow label="入力WAV" path={snapshot.project.vocalsMergedPath} />
+        <PathRow label="メイン字幕" path={snapshot.project.subtitlePath} />
+      </section>
+
+      <section className="panel workflow-panel">
+        <div className="section-heading compact">
+          <div>
+            <p className="eyebrow">Artifacts</p>
+            <h2>生成物一覧</h2>
+          </div>
+        </div>
+        <div className="artifact-list">
+          <PathRow label="分割フォルダ" path={snapshot.project.audioSplitDir} />
+          <PathRow label="ボーカル入力フォルダ" path={snapshot.project.vocalsSourceDir} />
+          <PathRow label="BGM入力フォルダ" path={snapshot.project.bgmSourceDir} />
+          <PathRow label="ボーカル結合WAV" path={snapshot.project.vocalsMergedPath} />
+          <PathRow label="BGM結合WAV" path={snapshot.project.bgmMergedPath} />
+          <PathRow label="メイン字幕" path={snapshot.project.subtitlePath} />
+        </div>
+      </section>
+    </div>
+  );
+}
+
+function MergePanel({
+  title,
+  target,
+  sourceDir,
+  preview,
+  error,
+  isLoading,
+  isBusy,
+  pending,
+  outputPath,
+  onPickFolder,
+  onMerge,
+}: {
+  title: string;
+  target: AudioMergeTarget;
+  sourceDir: string;
+  preview?: AudioMergePreview;
+  error: unknown;
+  isLoading: boolean;
+  isBusy: boolean;
+  pending: boolean;
+  outputPath?: string | null;
+  onPickFolder: () => void;
+  onMerge: () => void;
+}) {
+  const canMerge = Boolean(preview?.files.length);
+  return (
+    <section className="panel workflow-panel">
+      <div className="section-heading compact">
+        <div>
+          <p className="eyebrow">{target === "vocals" ? "Vocals" : "BGM"}</p>
+          <h2>{title}</h2>
+        </div>
+        <button onClick={onPickFolder} disabled={isBusy}>フォルダ選択</button>
+      </div>
+      <PathRow label="入力フォルダ" path={sourceDir} />
+      <PathRow label="出力WAV" path={outputPath} />
+      {isLoading && <p className="field-hint">WAV一覧を読み込んでいます...</p>}
+      {Boolean(error) && <p className="error-text">{String(error)}</p>}
+      {preview && (
+        <div className="wav-preview">
+          <div className="wav-preview-header">
+            <span>{preview.files.length} files</span>
+            <button className="primary" onClick={onMerge} disabled={isBusy || !canMerge}>
+              {pending ? "結合開始中..." : "結合実行"}
+            </button>
+          </div>
+          <ol>
+            {preview.files.slice(0, 12).map((path) => (
+              <li key={path} title={path}>{fileName(path)}</li>
+            ))}
+          </ol>
+          {preview.files.length > 12 && <p className="field-hint">他 {preview.files.length - 12} 件</p>}
+        </div>
+      )}
+    </section>
+  );
+}
+
+function PathRow({ label, path, canOpen = true }: { label: string; path?: string | null; canOpen?: boolean }) {
+  return (
+    <div className="path-row">
+      <span>{label}</span>
+      <strong title={path ?? ""}>{path || "未生成"}</strong>
+      {path && canOpen && <button onClick={() => openPath(folderLikePath(path) ? path : directoryPath(path))}>開く</button>}
     </div>
   );
 }
@@ -419,8 +734,33 @@ function sourceLabel(source: DownloadSource) {
   return source.kind === "url" ? source.url : fileName(source.path);
 }
 
+function projectMediaPath(snapshot: ProjectSnapshot) {
+  return snapshot.project.mediaAsset?.path ?? (snapshot.project.source.kind === "localFile" ? snapshot.project.source.path : null);
+}
+
 function fileName(path: string) {
   return path.split(/[\\/]/).pop() || path;
+}
+
+function directoryPath(path: string) {
+  const normalized = path.replace(/\\/g, "/");
+  const index = normalized.lastIndexOf("/");
+  return index > 0 ? path.slice(0, index) : path;
+}
+
+function formatDuration(durationMs: number) {
+  const totalSeconds = Math.round(durationMs / 1000);
+  const hours = Math.floor(totalSeconds / 3600);
+  const minutes = Math.floor((totalSeconds % 3600) / 60);
+  const seconds = totalSeconds % 60;
+  if (hours > 0) {
+    return `${hours}:${String(minutes).padStart(2, "0")}:${String(seconds).padStart(2, "0")}`;
+  }
+  return `${minutes}:${String(seconds).padStart(2, "0")}`;
+}
+
+function folderLikePath(path: string) {
+  return !/\.[^\\/]+$/.test(path);
 }
 
 export function replaceMarkers(markers: ClipMarker[], next: ClipMarker) {

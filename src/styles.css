@@ -178,6 +178,24 @@ a {
   min-height: 0;
 }
 
+.project-main-panel {
+  display: grid;
+  grid-template-rows: auto minmax(0, 1fr);
+  background: var(--bg);
+}
+
+.project-tabs {
+  display: flex;
+  gap: 0.45rem;
+  padding: 0.75rem 1rem;
+  border-bottom: 1px solid var(--line);
+  background: #181d1b;
+}
+
+.project-tabs button {
+  min-height: 36px;
+}
+
 .panel,
 .project-card,
 .subtitle-item,
@@ -331,6 +349,119 @@ a {
 .log-panel textarea {
   min-height: 220px;
   font-family: Consolas, monospace;
+}
+
+.audio-workflow {
+  min-height: 0;
+  overflow-y: auto;
+  display: grid;
+  align-content: start;
+  gap: 1rem;
+  padding: 1rem;
+}
+
+.workflow-panel {
+  display: grid;
+  gap: 0.9rem;
+}
+
+.workflow-metadata {
+  margin-top: 0;
+}
+
+.workflow-grid {
+  display: grid;
+  grid-template-columns: minmax(180px, 260px) auto;
+  align-items: end;
+  gap: 0.75rem;
+}
+
+.workflow-preview {
+  display: grid;
+  gap: 0.55rem;
+  padding: 0.75rem;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: #111614;
+}
+
+.workflow-preview.warning-preview {
+  border-color: rgba(239, 195, 106, 0.62);
+}
+
+.workflow-preview > div,
+.path-row {
+  min-width: 0;
+  display: grid;
+  grid-template-columns: 150px minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 0.75rem;
+}
+
+.workflow-preview span,
+.path-row span {
+  color: var(--muted);
+}
+
+.workflow-preview strong,
+.path-row strong {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-weight: 600;
+}
+
+.path-row button {
+  min-height: 34px;
+  padding: 0.35rem 0.65rem;
+}
+
+.workflow-columns {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 1rem;
+}
+
+.wav-preview {
+  display: grid;
+  gap: 0.6rem;
+  padding: 0.75rem;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: #111614;
+}
+
+.wav-preview-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.75rem;
+}
+
+.wav-preview-header span {
+  color: var(--muted);
+}
+
+.wav-preview ol,
+.artifact-list {
+  display: grid;
+  gap: 0.45rem;
+}
+
+.wav-preview ol {
+  max-height: 220px;
+  overflow-y: auto;
+  margin: 0;
+  padding-left: 1.3rem;
+}
+
+.wav-preview li {
+  min-width: 0;
+  overflow: hidden;
+  color: var(--muted);
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .error-text {
@@ -699,6 +830,13 @@ a {
     display: grid;
     grid-template-columns: 1fr;
     overflow: visible;
+  }
+
+  .workflow-grid,
+  .workflow-columns,
+  .workflow-preview > div,
+  .path-row {
+    grid-template-columns: 1fr;
   }
 
   .subtitle-list,

@@ -1,12 +1,15 @@
 use crate::application::{
-    create_silence_cut_for_loaded_project, detect_silence_for_project,
-    generate_highlight_request_for_project, import_highlight_candidates_from_file,
-    progress_payload, run_preparation_job, run_ytdlp_update,
+    build_audio_split_preview_for_project, create_silence_cut_for_loaded_project,
+    detect_silence_for_project, generate_highlight_request_for_project,
+    import_highlight_candidates_from_file, progress_payload, run_audio_merge_job,
+    run_audio_split_job, run_media_download_job, run_preparation_job, run_vocals_transcription_job,
+    run_ytdlp_update, scan_audio_merge_folder,
 };
 use crate::domain::{
-    AppSettings, ClipMarker, DownloadSource, HighlightRequestBundle, HighlightRequestOptions,
-    JobId, JobPhase, JobStatus, PreparationOptions, Project, ProjectSnapshot, ProjectSummary,
-    SilenceAnalysis, SilenceCutResult, SilenceCutSettings, SubtitleDocument,
+    AppSettings, AudioMergePreview, AudioMergeTarget, AudioSplitPreview, ClipMarker,
+    DownloadSource, HighlightRequestBundle, HighlightRequestOptions, JobId, JobPhase, JobStatus,
+    PreparationOptions, Project, ProjectSnapshot, ProjectSummary, SilenceAnalysis,
+    SilenceCutResult, SilenceCutSettings, SubtitleDocument,
 };
 use crate::infrastructure::{SystemProcessRunner, ToolResolver};
 use crate::storage::ProjectRepository;
@@ -138,6 +141,206 @@ pub async fn start_preparation_job(
         if let Some(registry) = app_for_task.try_state::<JobRegistry>() {
             registry.remove(&job_id_for_task);
         }
+    });
+
+    Ok(JobId { id: job_id })
+}
+
+#[tauri::command]
+pub async fn start_media_download_job(
+    app: AppHandle,
+    registry: State<'_, JobRegistry>,
+    project_id: String,
+) -> Result<JobId, String> {
+    let repository = repository_for(&app)?;
+    let settings = repository.load_settings()?;
+    let resource_dir = app.path().resource_dir().ok();
+    let job_id = Uuid::new_v4().to_string();
+    let cancelled = Arc::new(AtomicBool::new(false));
+    registry.insert(job_id.clone(), cancelled.clone())?;
+
+    let app_for_task = app.clone();
+    let job_id_for_task = job_id.clone();
+    let project_id_for_task = project_id.clone();
+    tauri::async_runtime::spawn(async move {
+        let runner = SystemProcessRunner;
+        let emit_progress = |phase: JobPhase, status: JobStatus, message: String| {
+            let payload = progress_payload(
+                &job_id_for_task,
+                &project_id_for_task,
+                phase,
+                status,
+                message,
+            );
+            let _ = app_for_task.emit("job-progress", payload);
+        };
+
+        let result = run_media_download_job(
+            repository.clone(),
+            project_id_for_task.clone(),
+            settings,
+            resource_dir,
+            &runner,
+            cancelled,
+            &emit_progress,
+        );
+        finish_project_job(&app_for_task, &job_id_for_task, result, &emit_progress);
+    });
+
+    Ok(JobId { id: job_id })
+}
+
+#[tauri::command]
+pub async fn preview_audio_split(
+    app: AppHandle,
+    project_id: String,
+    split_minutes: u32,
+) -> Result<AudioSplitPreview, String> {
+    let repository = repository_for(&app)?;
+    let resolver = ToolResolver::new(app.path().resource_dir().ok(), repository.load_settings()?);
+    build_audio_split_preview_for_project(&repository, &project_id, split_minutes, &resolver)
+}
+
+#[tauri::command]
+pub async fn start_audio_split_job(
+    app: AppHandle,
+    registry: State<'_, JobRegistry>,
+    project_id: String,
+    split_minutes: u32,
+) -> Result<JobId, String> {
+    let repository = repository_for(&app)?;
+    let settings = repository.load_settings()?;
+    let resource_dir = app.path().resource_dir().ok();
+    let job_id = Uuid::new_v4().to_string();
+    let cancelled = Arc::new(AtomicBool::new(false));
+    registry.insert(job_id.clone(), cancelled.clone())?;
+
+    let app_for_task = app.clone();
+    let job_id_for_task = job_id.clone();
+    let project_id_for_task = project_id.clone();
+    tauri::async_runtime::spawn(async move {
+        let runner = SystemProcessRunner;
+        let emit_progress = |phase: JobPhase, status: JobStatus, message: String| {
+            let payload = progress_payload(
+                &job_id_for_task,
+                &project_id_for_task,
+                phase,
+                status,
+                message,
+            );
+            let _ = app_for_task.emit("job-progress", payload);
+        };
+
+        let result = run_audio_split_job(
+            repository.clone(),
+            project_id_for_task.clone(),
+            split_minutes,
+            settings,
+            resource_dir,
+            &runner,
+            cancelled,
+            &emit_progress,
+        );
+        finish_project_job(&app_for_task, &job_id_for_task, result, &emit_progress);
+    });
+
+    Ok(JobId { id: job_id })
+}
+
+#[tauri::command]
+pub async fn scan_audio_merge(source_dir: String) -> Result<AudioMergePreview, String> {
+    scan_audio_merge_folder(&source_dir)
+}
+
+#[tauri::command]
+pub async fn start_audio_merge_job(
+    app: AppHandle,
+    registry: State<'_, JobRegistry>,
+    project_id: String,
+    target: AudioMergeTarget,
+    source_dir: String,
+) -> Result<JobId, String> {
+    let repository = repository_for(&app)?;
+    let settings = repository.load_settings()?;
+    let resource_dir = app.path().resource_dir().ok();
+    let job_id = Uuid::new_v4().to_string();
+    let cancelled = Arc::new(AtomicBool::new(false));
+    registry.insert(job_id.clone(), cancelled.clone())?;
+
+    let app_for_task = app.clone();
+    let job_id_for_task = job_id.clone();
+    let project_id_for_task = project_id.clone();
+    tauri::async_runtime::spawn(async move {
+        let runner = SystemProcessRunner;
+        let emit_progress = |phase: JobPhase, status: JobStatus, message: String| {
+            let payload = progress_payload(
+                &job_id_for_task,
+                &project_id_for_task,
+                phase,
+                status,
+                message,
+            );
+            let _ = app_for_task.emit("job-progress", payload);
+        };
+
+        let result = run_audio_merge_job(
+            repository.clone(),
+            project_id_for_task.clone(),
+            target,
+            source_dir,
+            settings,
+            resource_dir,
+            &runner,
+            cancelled,
+            &emit_progress,
+        );
+        finish_project_job(&app_for_task, &job_id_for_task, result, &emit_progress);
+    });
+
+    Ok(JobId { id: job_id })
+}
+
+#[tauri::command]
+pub async fn start_vocals_transcription_job(
+    app: AppHandle,
+    registry: State<'_, JobRegistry>,
+    project_id: String,
+    max_line_width: Option<u32>,
+) -> Result<JobId, String> {
+    let repository = repository_for(&app)?;
+    let settings = repository.load_settings()?;
+    let resource_dir = app.path().resource_dir().ok();
+    let job_id = Uuid::new_v4().to_string();
+    let cancelled = Arc::new(AtomicBool::new(false));
+    registry.insert(job_id.clone(), cancelled.clone())?;
+
+    let app_for_task = app.clone();
+    let job_id_for_task = job_id.clone();
+    let project_id_for_task = project_id.clone();
+    tauri::async_runtime::spawn(async move {
+        let runner = SystemProcessRunner;
+        let emit_progress = |phase: JobPhase, status: JobStatus, message: String| {
+            let payload = progress_payload(
+                &job_id_for_task,
+                &project_id_for_task,
+                phase,
+                status,
+                message,
+            );
+            let _ = app_for_task.emit("job-progress", payload);
+        };
+
+        let result = run_vocals_transcription_job(
+            repository.clone(),
+            project_id_for_task.clone(),
+            max_line_width,
+            settings,
+            resource_dir,
+            &runner,
+            cancelled,
+            &emit_progress,
+        );
+        finish_project_job(&app_for_task, &job_id_for_task, result, &emit_progress);
     });
 
     Ok(JobId { id: job_id })
@@ -439,6 +642,35 @@ pub async fn open_srt_file(file_path: String) -> Result<(), String> {
 }
 
 #[tauri::command]
+pub async fn open_path(path: String) -> Result<(), String> {
+    #[cfg(target_os = "windows")]
+    let mut command = {
+        let mut command = Command::new("explorer");
+        command.arg(&path);
+        command
+    };
+
+    #[cfg(target_os = "macos")]
+    let mut command = {
+        let mut command = Command::new("open");
+        command.arg(&path);
+        command
+    };
+
+    #[cfg(all(not(target_os = "windows"), not(target_os = "macos")))]
+    let mut command = {
+        let mut command = Command::new("xdg-open");
+        command.arg(&path);
+        command
+    };
+
+    command
+        .spawn()
+        .map_err(|e| format!("パスを開けませんでした: {}", e))?;
+    Ok(())
+}
+
+#[tauri::command]
 pub async fn read_srt_file(file_path: String) -> Result<Vec<SubtitleEntry>, String> {
     let content = fs::read_to_string(&file_path)
         .map_err(|e| format!("SRTファイルの読み込みに失敗しました: {}", e))?;
@@ -452,6 +684,36 @@ pub async fn save_srt_file(file_path: String, entries: Vec<SubtitleEntry>) -> Re
         .map_err(|e| format!("SRTファイルの保存に失敗しました: {}", e))?;
 
     Ok(())
+}
+
+fn finish_project_job(
+    app: &AppHandle,
+    job_id: &str,
+    result: Result<Project, String>,
+    emit_progress: &dyn Fn(JobPhase, JobStatus, String),
+) {
+    match result {
+        Ok(project) => {
+            let _ = app.emit("project-updated", project.id);
+        }
+        Err(error) => {
+            let phase = if error.contains("キャンセル") {
+                JobPhase::Cancelled
+            } else {
+                JobPhase::Failed
+            };
+            let status = if matches!(&phase, JobPhase::Cancelled) {
+                JobStatus::Cancelled
+            } else {
+                JobStatus::Failed
+            };
+            emit_progress(phase, status, error);
+        }
+    }
+
+    if let Some(registry) = app.try_state::<JobRegistry>() {
+        registry.remove(job_id);
+    }
 }
 
 fn repository_for(app: &AppHandle) -> Result<ProjectRepository, String> {

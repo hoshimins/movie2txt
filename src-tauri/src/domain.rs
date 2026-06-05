@@ -67,6 +67,16 @@ pub struct Project {
     pub highlight_request_path: Option<String>,
     #[serde(default)]
     pub highlight_candidates_path: Option<String>,
+    #[serde(default)]
+    pub audio_split_dir: Option<String>,
+    #[serde(default)]
+    pub vocals_source_dir: Option<String>,
+    #[serde(default)]
+    pub bgm_source_dir: Option<String>,
+    #[serde(default)]
+    pub vocals_merged_path: Option<String>,
+    #[serde(default)]
+    pub bgm_merged_path: Option<String>,
     pub markers: Vec<ClipMarker>,
     pub created_at: u64,
     pub updated_at: u64,
@@ -194,6 +204,31 @@ pub struct HighlightRequestBundle {
     pub candidate_output_path: String,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct AudioSplitPreview {
+    pub input_path: String,
+    pub output_dir: String,
+    pub duration_ms: u64,
+    pub split_minutes: u32,
+    pub part_count: u32,
+    pub output_exists: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct AudioMergePreview {
+    pub source_dir: String,
+    pub files: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub enum AudioMergeTarget {
+    Vocals,
+    Bgm,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct HighlightCandidate {
@@ -269,6 +304,8 @@ pub enum JobPhase {
     Postprocess,
     DetectSilence,
     CutSilence,
+    SplitAudio,
+    MergeAudio,
     GenerateHighlightRequest,
     Completed,
     Failed,
