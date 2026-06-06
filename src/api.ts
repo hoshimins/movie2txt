@@ -32,6 +32,10 @@ export function openProject(projectId: string) {
   return invoke<ProjectSnapshot>("open_project", { projectId });
 }
 
+export function attachExistingMedia(projectId: string, path: string) {
+  return invoke<Project>("attach_existing_media", { projectId, path });
+}
+
 export function startPreparationJob(projectId: string, options: PreparationOptions) {
   return invoke<JobId>("start_preparation_job", { projectId, options });
 }

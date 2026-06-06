@@ -6,6 +6,7 @@ import { useMachine } from "@xstate/react";
 import { useEffect, useState } from "react";
 import { z } from "zod";
 import {
+  attachExistingMedia,
   cancelJob,
   createProject,
   getAppSettings,
@@ -229,6 +230,14 @@ function ProjectPage() {
     onSuccess: (job) => send({ type: "START", jobId: job.id, projectId }),
   });
 
+  const attachExistingMediaMutation = useMutation({
+    mutationFn: (path: string) => attachExistingMedia(projectId, path),
+    onSuccess: async () => {
+      await queryClient.invalidateQueries({ queryKey: ["project", projectId] });
+      await queryClient.invalidateQueries({ queryKey: ["projects"] });
+    },
+  });
+
   const audioSplitMutation = useMutation({
     mutationFn: (splitMinutes: number) => startAudioSplitJob(projectId, splitMinutes),
     onSuccess: (job) => send({ type: "START", jobId: job.id, projectId }),
@@ -387,8 +396,11 @@ function ProjectPage() {
             splitPending={audioSplitMutation.isPending}
             mergePending={audioMergeMutation.isPending}
             downloadPending={mediaDownloadMutation.isPending}
+            attachPending={attachExistingMediaMutation.isPending}
+            attachError={attachExistingMediaMutation.error}
             transcriptionPending={vocalsTranscriptionMutation.isPending}
             onDownloadMedia={() => mediaDownloadMutation.mutate()}
+            onAttachExistingMedia={(path) => attachExistingMediaMutation.mutate(path)}
             onSplitAudio={(splitMinutes) => audioSplitMutation.mutate(splitMinutes)}
             onMergeAudio={(target, sourceDir) => audioMergeMutation.mutate({ target, sourceDir })}
             onTranscribeVocals={() => vocalsTranscriptionMutation.mutate()}
@@ -426,8 +438,11 @@ function AudioWorkflow({
   splitPending,
   mergePending,
   downloadPending,
+  attachPending,
+  attachError,
   transcriptionPending,
   onDownloadMedia,
+  onAttachExistingMedia,
   onSplitAudio,
   onMergeAudio,
   onTranscribeVocals,
@@ -438,8 +453,11 @@ function AudioWorkflow({
   splitPending: boolean;
   mergePending: boolean;
   downloadPending: boolean;
+  attachPending: boolean;
+  attachError: unknown;
   transcriptionPending: boolean;
   onDownloadMedia: () => void;
+  onAttachExistingMedia: (path: string) => void;
   onSplitAudio: (splitMinutes: number) => void;
   onMergeAudio: (target: AudioMergeTarget, sourceDir: string) => void;
   onTranscribeVocals: () => void;
@@ -449,7 +467,7 @@ function AudioWorkflow({
   const [bgmSourceDir, setBgmSourceDir] = useState(snapshot.project.bgmSourceDir ?? "");
   const mediaPath = projectMediaPath(snapshot);
   const canSplit = Boolean(mediaPath);
-  const isBusy = isRunning || splitPending || mergePending || downloadPending || transcriptionPending;
+  const isBusy = isRunning || splitPending || mergePending || downloadPending || attachPending || transcriptionPending;
 
   useEffect(() => {
     setVocalsSourceDir(snapshot.project.vocalsSourceDir ?? "");
@@ -488,6 +506,22 @@ function AudioWorkflow({
     }
   };
 
+  const pickExistingMedia = async () => {
+    const selected = await open({
+      multiple: false,
+      filters: [
+        {
+          name: "Video / Audio",
+          extensions: ["mp4", "avi", "mov", "mkv", "flv", "wmv", "m4a", "mp3", "wav"],
+        },
+      ],
+    });
+
+    if (typeof selected === "string") {
+      onAttachExistingMedia(selected);
+    }
+  };
+
   const splitPreview = splitPreviewQuery.data;
   const splitBlocked = !canSplit || splitMinutes < 1 || Boolean(splitPreview?.outputExists) || splitPreviewQuery.isError;
 
@@ -499,10 +533,17 @@ function AudioWorkflow({
             <p className="eyebrow">Audio Workflow</p>
             <h2>動画取得と24-bit WAV分割</h2>
           </div>
-          {snapshot.project.source.kind === "url" && !snapshot.project.mediaAsset && (
-            <button className="primary" onClick={onDownloadMedia} disabled={isBusy}>
-              {downloadPending ? "取得開始中..." : "URL動画を取得"}
-            </button>
+          {snapshot.project.source.kind === "url" && (
+            <div className="workflow-actions">
+              {!snapshot.project.mediaAsset && (
+                <button className="primary" onClick={onDownloadMedia} disabled={isBusy}>
+                  {downloadPending ? "取得開始中..." : "URL動画を取得"}
+                </button>
+              )}
+              <button onClick={pickExistingMedia} disabled={isBusy}>
+                {attachPending ? "紐づけ中..." : "既存ファイルを選択"}
+              </button>
+            </div>
           )}
         </div>
 
@@ -510,6 +551,7 @@ function AudioWorkflow({
           <div><dt>Input</dt><dd title={mediaPath ?? ""}>{mediaPath ? fileName(mediaPath) : "動画取得後に分割できます"}</dd></div>
           <div><dt>Format</dt><dd>24-bit WAV / 元サンプルレート・チャンネル維持</dd></div>
         </dl>
+        {Boolean(attachError) && <p className="error-text">{String(attachError)}</p>}
 
         <div className="workflow-grid">
           <label>
