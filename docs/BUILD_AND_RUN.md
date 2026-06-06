@@ -11,6 +11,7 @@
 - Rust / Cargo
 - Visual Studio C++ Build Tools
 - `ffmpeg.exe`
+- `yt-dlp.exe`
 - `faster-whisper.exe`
 - CUDA が使える NVIDIA GPU
 
@@ -28,11 +29,24 @@ cd /path/to/movie2text
 npm install
 ```
 
-## 3. `.env` を設定する
+## 3. 外部ツールを設定する
+
+推奨は `src-tauri/binaries/` に以下を置いて、Tauri バンドルに同梱する方法です。
+
+```text
+src-tauri/binaries/yt-dlp.exe
+src-tauri/binaries/ffmpeg.exe
+src-tauri/binaries/faster-whisper.exe
+```
+
+同梱しない場合は、アプリの Settings 画面で各 exe の絶対パスを保存します。
+
+### 互換用 `.env`
 
 プロジェクトルートに `.env` を置きます。テンプレートは `.env.example` です。
 
 ```env
+YTDLP_PATH=C:\\Tools\\yt-dlp\\yt-dlp.exe
 FFMPEG_PATH=C:\\Tools\\ffmpeg\\ffmpeg.exe
 WHISPER_PATH=C:\\Tools\\whisper\\faster-whisper.exe
 TMP_DIR=D:\\movie2text\\tmp
@@ -107,11 +121,11 @@ Tauri の実行ファイルやインストーラー:
 ## 8. 動作確認の流れ
 
 1. アプリを起動する
-2. 動画ファイルを選ぶ
-3. 「字幕を生成」を押す
-4. ログ欄に `ffmpeg処理を開始します...` が出ることを確認する
-5. `OUTPUT_DIR` に `.srt` が生成されることを確認する
-6. 必要なら字幕編集画面で保存できることを確認する
+2. URLまたはローカル素材からプロジェクトを作る
+3. プロジェクト画面で準備ジョブを実行する
+4. ログ欄に download / extract-audio / transcribe / postprocess の進捗が出ることを確認する
+5. プロジェクト配下に素材、`audio.wav`、`.srt` が生成されることを確認する
+6. 字幕編集と切り抜き候補マーカーを保存できることを確認する
 
 ## 9. よくある詰まりどころ
 

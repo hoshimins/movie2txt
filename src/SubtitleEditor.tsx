@@ -1,24 +1,26 @@
 import { convertFileSrc, invoke } from "@tauri-apps/api/core";
+import { open } from "@tauri-apps/plugin-dialog";
 import { useEffect, useRef, useState } from "react";
-
-interface SubtitleEntry {
-  index: number;
-  start_time: string;
-  end_time: string;
-  text: string;
-}
+import { generateHighlightRequest, importHighlightCandidates, saveClipMarkers, saveSubtitles } from "./api";
+import type { ClipMarker, SubtitleEntry } from "./types";
 
 interface SubtitleEditorProps {
+  projectId?: string;
   srtFilePath: string;
   videoFilePath: string;
+  initialMarkers?: ClipMarker[];
   onClose: () => void;
   onSave: () => void;
 }
 
-function SubtitleEditor({ srtFilePath, videoFilePath, onClose, onSave }: SubtitleEditorProps) {
+function SubtitleEditor({ projectId, srtFilePath, videoFilePath, initialMarkers = [], onClose, onSave }: SubtitleEditorProps) {
   const [entries, setEntries] = useState<SubtitleEntry[]>([]);
+  const [markers, setMarkers] = useState<ClipMarker[]>(initialMarkers);
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
+  const [highlightBusy, setHighlightBusy] = useState(false);
+  const [highlightMessage, setHighlightMessage] = useState("");
+  const [pendingCandidateMarkers, setPendingCandidateMarkers] = useState<ClipMarker[]>([]);
   const [error, setError] = useState<string>("");
   const [isPlaying, setIsPlaying] = useState(false);
   const [currentTime, setCurrentTime] = useState(0);
@@ -33,6 +35,10 @@ function SubtitleEditor({ srtFilePath, videoFilePath, onClose, onSave }: Subtitl
   useEffect(() => {
     loadSubtitles();
   }, [srtFilePath]);
+
+  useEffect(() => {
+    setMarkers(initialMarkers);
+  }, [initialMarkers]);
 
   useEffect(() => {
     console.log("Video file path:", videoFilePath);
@@ -162,13 +168,117 @@ function SubtitleEditor({ srtFilePath, videoFilePath, onClose, onSave }: Subtitl
     try {
       setSaving(true);
       setError("");
-      await invoke("save_srt_file", { filePath: srtFilePath, entries });
+      if (projectId) {
+        await saveSubtitles(projectId, entries);
+      } else {
+        await invoke("save_srt_file", { filePath: srtFilePath, entries });
+      }
+      if (projectId) {
+        await saveClipMarkers(projectId, markers);
+      }
       onSave();
     } catch (err) {
       setError(`保存に失敗しました: ${err}`);
     } finally {
       setSaving(false);
     }
+  };
+
+  const handleSaveMarkers = async () => {
+    if (!projectId) return;
+
+    try {
+      setSaving(true);
+      setError("");
+      await saveClipMarkers(projectId, markers);
+      onSave();
+    } catch (err) {
+      setError(`切り抜き候補の保存に失敗しました: ${err}`);
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  const handleAddMarker = () => {
+    const activeEntry = activeSubtitleIndex
+      ? entries.find((entry) => entry.index === activeSubtitleIndex)
+      : null;
+    const startMs = activeEntry
+      ? Math.round(parseTimeToSeconds(activeEntry.start_time) * 1000)
+      : Math.max(0, Math.round((currentTime - 5) * 1000));
+    const endMs = activeEntry
+      ? Math.round(parseTimeToSeconds(activeEntry.end_time) * 1000)
+      : Math.round((currentTime + 10) * 1000);
+    const titleSource = activeEntry?.text.trim() || `候補 ${markers.length + 1}`;
+
+    setMarkers((prev) => [
+      ...prev,
+      {
+        id: crypto.randomUUID(),
+        startMs,
+        endMs: Math.max(endMs, startMs + 1_000),
+        title: titleSource.slice(0, 36),
+        memo: "",
+        tags: [],
+        sourceSubtitleIds: activeEntry ? [activeEntry.index] : [],
+      },
+    ]);
+  };
+
+  const updateMarker = (id: string, patch: Partial<ClipMarker>) => {
+    setMarkers((prev) =>
+      prev.map((marker) => (marker.id === id ? { ...marker, ...patch } : marker)),
+    );
+  };
+
+  const deleteMarker = (id: string) => {
+    setMarkers((prev) => prev.filter((marker) => marker.id !== id));
+  };
+
+  const handleGenerateHighlightRequest = async () => {
+    if (!projectId) return;
+
+    try {
+      setHighlightBusy(true);
+      setHighlightMessage("");
+      setError("");
+      const bundle = await generateHighlightRequest(projectId, { maxCandidates: 20 });
+      setHighlightMessage(`依頼ファイルを生成しました: ${bundle.requestPath}`);
+      onSave();
+    } catch (err) {
+      setError(`見どころ依頼ファイルの生成に失敗しました: ${err}`);
+    } finally {
+      setHighlightBusy(false);
+    }
+  };
+
+  const handleImportHighlightCandidates = async () => {
+    if (!projectId) return;
+
+    const selected = await open({
+      multiple: false,
+      filters: [{ name: "Highlight candidates", extensions: ["json"] }],
+    });
+    if (typeof selected !== "string") return;
+
+    try {
+      setHighlightBusy(true);
+      setHighlightMessage("");
+      setError("");
+      const imported = await importHighlightCandidates(projectId, selected);
+      setPendingCandidateMarkers(imported);
+      setHighlightMessage(`${imported.length}件の見どころ候補を読み込みました。確認してからマーカー化してください。`);
+    } catch (err) {
+      setError(`見どころ候補の読み込みに失敗しました: ${err}`);
+    } finally {
+      setHighlightBusy(false);
+    }
+  };
+
+  const handleAcceptCandidateMarkers = () => {
+    setMarkers((prev) => mergeMarkers(prev, pendingCandidateMarkers));
+    setHighlightMessage(`${pendingCandidateMarkers.length}件の候補をマーカーに追加しました。保存するとプロジェクトに反映されます。`);
+    setPendingCandidateMarkers([]);
   };
 
   const parseTimeToSeconds = (time: string): number => {
@@ -332,6 +442,8 @@ function SubtitleEditor({ srtFilePath, videoFilePath, onClose, onSave }: Subtitl
   }
 
   const videoSrc = convertFileSrc(videoFilePath);
+  const activeSubtitle = entries.find(entry => entry.index === activeSubtitleIndex);
+  const hasActiveSubtitleText = Boolean(activeSubtitle?.text.trim());
 
   return (
     <div className="subtitle-editor">
@@ -348,26 +460,35 @@ function SubtitleEditor({ srtFilePath, videoFilePath, onClose, onSave }: Subtitl
         </div>
       </div>
 
-      {error && <div className="error-message panel error-panel">{error}</div>}
-      {videoError && <div className="error-message panel error-panel">動画エラー: {videoError}</div>}
+      <div className="editor-notices">
+        {error && <div className="error-message panel error-panel">{error}</div>}
+        {videoError && <div className="error-message panel error-panel">動画エラー: {videoError}</div>}
+      </div>
 
       <div className="editor-content">
         <div className="video-preview">
-          {!videoLoaded && !videoError && (
-            <div className="video-loading">動画を読み込んでいます...</div>
-          )}
-          <video
-            ref={videoRef}
-            src={videoSrc}
-            onTimeUpdate={handleTimeUpdate}
-            onPlay={() => setIsPlaying(true)}
-            onPause={() => setIsPlaying(false)}
-            onError={handleVideoError}
-            onLoadedMetadata={handleVideoLoadedMetadata}
-            onCanPlay={handleVideoCanPlay}
-            controls
-            className="video-player"
-          />
+          <div className="video-stage">
+            {!videoLoaded && !videoError && (
+              <div className="video-loading">動画を読み込んでいます...</div>
+            )}
+            <video
+              ref={videoRef}
+              src={videoSrc}
+              onTimeUpdate={handleTimeUpdate}
+              onPlay={() => setIsPlaying(true)}
+              onPause={() => setIsPlaying(false)}
+              onError={handleVideoError}
+              onLoadedMetadata={handleVideoLoadedMetadata}
+              onCanPlay={handleVideoCanPlay}
+              controls
+              className="video-player"
+            />
+            {activeSubtitle && hasActiveSubtitleText && (
+              <div className="video-subtitle-overlay">
+                {activeSubtitle.text}
+              </div>
+            )}
+          </div>
           <div className="video-controls">
             <button onClick={handlePlayPause} className="primary" disabled={!videoLoaded}>
               {isPlaying ? "⏸ 一時停止" : "▶ 再生"}
@@ -501,9 +622,95 @@ function SubtitleEditor({ srtFilePath, videoFilePath, onClose, onSave }: Subtitl
             </div>
           ))}
         </div>
+
+        <div className="clip-marker-panel">
+          <div className="clip-marker-header">
+            <div>
+              <p className="eyebrow">Clip</p>
+              <h3>切り抜き候補</h3>
+            </div>
+            <div className="clip-marker-actions">
+              <button onClick={handleGenerateHighlightRequest} disabled={!projectId || highlightBusy}>
+                依頼生成
+              </button>
+              <button onClick={handleImportHighlightCandidates} disabled={!projectId || highlightBusy}>
+                候補読込
+              </button>
+              <button onClick={handleAddMarker}>候補追加</button>
+              <button onClick={handleSaveMarkers} disabled={!projectId || saving}>
+                候補保存
+              </button>
+            </div>
+          </div>
+          {highlightMessage && <p className="field-hint">{highlightMessage}</p>}
+          {pendingCandidateMarkers.length > 0 && (
+            <div className="candidate-review">
+              <div className="candidate-review-header">
+                <strong>{pendingCandidateMarkers.length}件の候補</strong>
+                <div>
+                  <button className="primary" onClick={handleAcceptCandidateMarkers}>マーカー化</button>
+                  <button onClick={() => setPendingCandidateMarkers([])}>破棄</button>
+                </div>
+              </div>
+              <div className="candidate-review-list">
+                {pendingCandidateMarkers.slice(0, 5).map((marker) => (
+                  <div key={marker.id} className="candidate-review-item">
+                    <strong>{marker.title}</strong>
+                    <span>{marker.startMs}ms - {marker.endMs}ms</span>
+                  </div>
+                ))}
+              </div>
+            </div>
+          )}
+          <div className="clip-marker-list">
+            {markers.map((marker) => (
+              <article key={marker.id} className="clip-marker-item">
+                <div className="marker-time-row">
+                  <input
+                    type="number"
+                    value={marker.startMs}
+                    onChange={(event) => updateMarker(marker.id, { startMs: Number(event.target.value) })}
+                    title="開始ミリ秒"
+                  />
+                  <input
+                    type="number"
+                    value={marker.endMs}
+                    onChange={(event) => updateMarker(marker.id, { endMs: Number(event.target.value) })}
+                    title="終了ミリ秒"
+                  />
+                </div>
+                <input
+                  type="text"
+                  value={marker.title}
+                  onChange={(event) => updateMarker(marker.id, { title: event.target.value })}
+                  placeholder="候補タイトル"
+                />
+                <textarea
+                  value={marker.memo}
+                  onChange={(event) => updateMarker(marker.id, { memo: event.target.value })}
+                  placeholder="編集メモ"
+                  rows={2}
+                />
+                <div className="marker-footer">
+                  <span>字幕: {marker.sourceSubtitleIds.join(", ") || "未紐付け"}</span>
+                  <button className="delete-btn" onClick={() => deleteMarker(marker.id)}>削除</button>
+                </div>
+              </article>
+            ))}
+            {markers.length === 0 && <p className="field-hint">再生位置または選択中の字幕から候補を追加できます。</p>}
+          </div>
+        </div>
       </div>
     </div>
   );
 }
 
 export default SubtitleEditor;
+
+function mergeMarkers(current: ClipMarker[], imported: ClipMarker[]) {
+  const existingIds = new Set(current.map((marker) => marker.id));
+  return [
+    ...current,
+    ...imported.filter((marker) => !existingIds.has(marker.id)),
+  ];
+}
