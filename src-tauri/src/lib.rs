@@ -26,6 +26,7 @@ pub fn run() {
             commands::create_project,
             commands::list_projects,
             commands::open_project,
+            commands::attach_existing_media,
             commands::start_preparation_job,
             commands::start_media_download_job,
             commands::preview_audio_split,

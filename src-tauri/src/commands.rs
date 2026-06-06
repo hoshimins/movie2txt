@@ -79,6 +79,18 @@ pub async fn open_project(app: AppHandle, project_id: String) -> Result<ProjectS
 }
 
 #[tauri::command]
+pub async fn attach_existing_media(
+    app: AppHandle,
+    project_id: String,
+    path: String,
+) -> Result<Project, String> {
+    let project = repository_for(&app)?.attach_existing_media(&project_id, path)?;
+    app.emit("project-updated", project.id.clone())
+        .map_err(|e| format!("プロジェクト更新通知に失敗しました: {}", e))?;
+    Ok(project)
+}
+
+#[tauri::command]
 pub async fn start_preparation_job(
     app: AppHandle,
     registry: State<'_, JobRegistry>,

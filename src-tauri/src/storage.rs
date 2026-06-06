@@ -1,6 +1,6 @@
 use crate::domain::{
-    project_summary, AppSettings, DownloadSource, Project, ProjectSnapshot, ProjectSummary,
-    SubtitleDocument,
+    project_summary, AppSettings, DownloadSource, MediaAsset, Project, ProjectSnapshot,
+    ProjectSummary, SubtitleDocument,
 };
 use std::fs;
 use std::path::PathBuf;
@@ -101,6 +101,34 @@ impl ProjectRepository {
             .map_err(|e| format!("プロジェクト情報の変換に失敗しました: {}", e))?;
         fs::write(project_dir.join(PROJECT_FILE), json)
             .map_err(|e| format!("プロジェクト情報の保存に失敗しました: {}", e))
+    }
+
+    pub fn attach_existing_media(&self, project_id: &str, path: String) -> Result<Project, String> {
+        if path.is_empty() {
+            return Err("素材ファイルを選択してください".to_string());
+        }
+
+        let media_path = PathBuf::from(&path);
+        let metadata = fs::metadata(&media_path)
+            .map_err(|e| format!("素材ファイルを確認できませんでした: {}", e))?;
+        if !metadata.is_file() {
+            return Err("選択したパスはファイルではありません".to_string());
+        }
+
+        let mut project = self.load_project(project_id)?;
+        let file_name = media_path
+            .file_name()
+            .map(|value| value.to_string_lossy().to_string())
+            .ok_or_else(|| "素材ファイル名の取得に失敗しました".to_string())?;
+
+        project.media_asset = Some(MediaAsset {
+            path,
+            file_name,
+            source: project.source.clone(),
+        });
+        project.updated_at = unix_timestamp();
+        self.save_project(&project)?;
+        Ok(project)
     }
 
     pub fn save_subtitles(
@@ -251,5 +279,50 @@ mod tests {
 
         let snapshot = repository.open_project(&project.id).unwrap();
         assert_eq!(snapshot.project.markers.len(), 1);
+    }
+
+    #[test]
+    fn existing_media_can_be_attached_to_url_project() {
+        let temp = tempfile::tempdir().unwrap();
+        let repository = ProjectRepository::new(temp.path().join("app"));
+        let project = repository
+            .create_project(
+                "URL".to_string(),
+                DownloadSource::Url {
+                    url: "https://example.com/watch".to_string(),
+                },
+            )
+            .unwrap();
+        let media_path = temp.path().join("source.mp4");
+        fs::write(&media_path, b"media").unwrap();
+
+        let updated = repository
+            .attach_existing_media(&project.id, media_path.to_string_lossy().to_string())
+            .unwrap();
+
+        let asset = updated.media_asset.unwrap();
+        assert_eq!(asset.path, media_path.to_string_lossy().to_string());
+        assert_eq!(asset.file_name, "source.mp4");
+        assert_eq!(asset.source, project.source);
+    }
+
+    #[test]
+    fn attaching_directory_as_media_is_rejected() {
+        let temp = tempfile::tempdir().unwrap();
+        let repository = ProjectRepository::new(temp.path().join("app"));
+        let project = repository
+            .create_project(
+                "URL".to_string(),
+                DownloadSource::Url {
+                    url: "https://example.com/watch".to_string(),
+                },
+            )
+            .unwrap();
+
+        let error = repository
+            .attach_existing_media(&project.id, temp.path().to_string_lossy().to_string())
+            .unwrap_err();
+
+        assert!(error.contains("ファイルではありません"));
     }
 }

@@ -369,6 +369,13 @@ a {
   margin-top: 0;
 }
 
+.workflow-actions {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  gap: 0.5rem;
+}
+
 .workflow-grid {
   display: grid;
   grid-template-columns: minmax(180px, 260px) auto;
